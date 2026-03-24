@@ -27,26 +27,82 @@
 //   }
 // };
 
+// import dotenv from "dotenv";
+// dotenv.config(); // ✅ MUST be first
+
+// import app from "./app.js";
+// import logger from "./config/logger.js";
+// import connectMongo from "./config/mongo.js";
+// import connectNeo4j from "./config/neo4j.js";
+// import {connectRedis} from "./config/redis.js";
+
+// const PORT = process.env.PORT || 5000;
+
+// const startServer = async () => {
+//   try {
+//     await connectMongo();
+//     await connectNeo4j();
+//     await connectRedis();
+
+//     app.listen(PORT, () => {
+//       logger.info(`Server running on port ${PORT}`);
+//     });
+//   } catch (error) {
+//     logger.error("Failed to start server", error);
+//     process.exit(1);
+//   }
+// };
+
+// startServer();
 import dotenv from "dotenv";
-dotenv.config(); // ✅ MUST be first
+dotenv.config(); // MUST be first
+
+import http from "http";
+import { Server } from "socket.io";
 
 import app from "./app.js";
 import logger from "./config/logger.js";
 import connectMongo from "./config/mongo.js";
 import connectNeo4j from "./config/neo4j.js";
-import {connectRedis} from "./config/redis.js";
+import { connectRedis } from "./config/redis.js";
 
 const PORT = process.env.PORT || 5000;
 
 const startServer = async () => {
   try {
+    // ✅ Connect Databases
     await connectMongo();
     await connectNeo4j();
     await connectRedis();
 
-    app.listen(PORT, () => {
+    // ✅ Create HTTP server
+    const server = http.createServer(app);
+
+    // ✅ Initialize Socket.IO
+    const io = new Server(server, {
+      cors: {
+        origin: "*", // change to frontend URL later
+        methods: ["GET", "POST"]
+      }
+    });
+
+    // ✅ Socket Connection Handling
+    io.on("connection", (socket) => {
+      logger.info(`Client connected: ${socket.id}`);
+
+      socket.on("disconnect", () => {
+        logger.info(`Client disconnected: ${socket.id}`);
+      });
+    });
+
+    // ✅ Make io globally accessible (important)
+    app.set("io", io);
+
+    // ✅ Start Server
+    server.listen(PORT, () => {
       logger.info(`Server running on port ${PORT}`);
     });
+
   } catch (error) {
     logger.error("Failed to start server", error);
     process.exit(1);

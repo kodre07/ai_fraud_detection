@@ -6,6 +6,7 @@
   "main": "index.js",
   "dependencies": {
     "accepts": "^2.0.0",
+    "axios": "^1.13.6",
     "bcryptjs": "^3.0.3",
     "body-parser": "^2.2.2",
     "bytes": "^3.1.2",
@@ -90,7 +91,8 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "nodemon src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "worker": "node src/workers/ml.worker.js"
   },
   "keywords": [],
   "author": "",

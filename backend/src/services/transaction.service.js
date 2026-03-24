@@ -60,7 +60,6 @@
 // export default {
 //   processTransaction,
 // };
-
 import Transaction from "../models/Transaction.js";
 import entityResolutionService from "./entityResolution.service.js";
 import graphService from "./graph.service.js";
@@ -87,13 +86,20 @@ const processTransaction = async (data) => {
       deviceId: data.deviceId,
       ipAddress: data.ipAddress,
       timestamp: data.timestamp || new Date(),
+
+      // ✅ Initial scoring state
       fraudScore: 0,
       riskLevel: "low",
       isFraud: false,
-      status: "pending",
+
+      // ✅ Pipeline tracking
+      processingStage: "ingested",
       mlProcessed: false,
-      ruleScore: 0,  // ensure explicitly initialized
-      aiScore: 0
+      mlRequestedAt: new Date(),
+
+      // ✅ Scores
+      ruleScore: 0,
+      aiScore: 0,
     });
 
     console.log("💾 Transaction saved:", transaction._id);
@@ -104,17 +110,21 @@ const processTransaction = async (data) => {
 
     const resolution = await entityResolutionService.resolve(transaction);
 
-    // ✅ Store ruleScore
-    transaction.ruleScore = resolution.ruleScore;
+    const ruleScore = resolution?.ruleScore ?? 0;
 
-    // Temporary risk classification (before AI)
-    if (resolution.ruleScore >= 0.5) {
+    transaction.ruleScore = ruleScore;
+
+    // ✅ Update stage
+    transaction.processingStage = "rule_scored";
+
+    // ✅ Temporary risk classification
+    if (ruleScore >= 0.5) {
       transaction.riskLevel = "medium";
     }
 
     await transaction.save();
 
-    console.log("📊 Rule score updated:", resolution.ruleScore);
+    console.log("📊 Rule score updated:", ruleScore);
 
     /* ============================= */
     /* 3️⃣ UPDATE GRAPH (Neo4j)      */
@@ -122,11 +132,18 @@ const processTransaction = async (data) => {
 
     await graphService.createTransactionGraph(transaction);
 
+    console.log("🔗 Graph updated");
+
     /* ============================= */
     /* 4️⃣ PUSH TO REDIS QUEUE       */
     /* ============================= */
 
     await redisQueueService.enqueueFraudCheck(transaction._id);
+
+    // ✅ Update stage
+    transaction.processingStage = "ml_pending";
+
+    await transaction.save();
 
     console.log("📩 Transaction pushed to ML queue");
 
