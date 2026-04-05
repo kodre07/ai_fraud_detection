@@ -197,7 +197,8 @@ export const createAlert = async (req, res, next) => {
 
     let riskLevel = "low";
 
-    if (fraudScore >= 0.8) riskLevel = "high";
+    if (fraudScore >= 0.9) riskLevel = "critical";      // ADD this
+    else if (fraudScore >= 0.8) riskLevel = "high";
     else if (fraudScore >= 0.5) riskLevel = "medium";
 
     /* ============================= */

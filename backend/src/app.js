@@ -144,18 +144,23 @@
 
 // export default app;
 
+
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 
 import rateLimitMiddleware from "./middlewares/rateLimit.middleware.js";
 import errorMiddleware from "./middlewares/error.middleware.js";
-import authRoutes from "./routes/auth.routes.js";
 
+import authRoutes from "./routes/auth.routes.js";
 import healthRoutes from "./routes/health.routes.js";
 import transactionRoutes from "./routes/transaction.routes.js";
 import mlRoutes from "./routes/ml.routes.js";
 import alertRoutes from "./routes/alert.routes.js";
+import caseRoutes from "./routes/case.routes.js";
+import accountRoutes from "./routes/account.routes.js";
+// ✅ (OPTIONAL but recommended if you add cases soon)
+// import caseRoutes from "./routes/case.routes.js";
 
 const app = express();
 
@@ -163,16 +168,22 @@ const app = express();
 /*         CORE MIDDLEWARE       */
 /* ============================= */
 
+// ✅ Security headers
 app.use(helmet());
 
+// ✅ CORS (tighten later for prod)
 app.use(
   cors({
-    origin: "*", // 🔥 change to frontend URL later (important for prod)
+    origin: "*", // 🔥 change to frontend URL in production
     methods: ["GET", "POST", "PUT", "DELETE"],
+    credentials: true,
   })
 );
 
+// ✅ Body parser
 app.use(express.json());
+
+// ✅ Rate limiting
 app.use(rateLimitMiddleware);
 
 /* ============================= */
@@ -184,6 +195,11 @@ app.use("/api/auth", authRoutes);
 app.use("/api/transactions", transactionRoutes);
 app.use("/api/ml", mlRoutes);
 app.use("/api/alerts", alertRoutes);
+app.use("/api/cases", caseRoutes);
+app.use("/api/accounts", accountRoutes);
+
+// ✅ (future)
+// app.use("/api/cases", caseRoutes);
 
 /* ============================= */
 /*          404 HANDLER          */

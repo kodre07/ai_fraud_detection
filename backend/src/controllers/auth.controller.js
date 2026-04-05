@@ -130,6 +130,12 @@ export const loginAnalyst = async (req, res, next) => {
         message: "Invalid credentials",
       });
     }
+    if (!analyst.isActive) {
+      return res.status(403).json({
+        success: false,
+        message: "Account is deactivated. Contact admin.",
+      });
+    }
 
     /* ============================= */
     /*      CHECK PASSWORD           */

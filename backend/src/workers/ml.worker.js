@@ -54,40 +54,160 @@
 
 // startWorker();
 
+// import dotenv from "dotenv";
+// dotenv.config();
+
+// import redisClient, { connectRedis } from "../config/redis.js";
+// import axios from "axios";
+
+// const QUEUE_NAME = "fraud_scoring_queue";
+
+// /* ============================= */
+// /*     CALL PYTHON ML SERVICE    */
+// /* ============================= */
+
+// const callMLService = async (jobData) => {
+//   try {
+//     const parsed = JSON.parse(jobData);
+//     const { transactionId } = parsed;
+
+//     if (!transactionId) {
+//       console.warn("⚠️ Invalid job data:", jobData);
+//       return;
+//     }
+
+//     console.log(`🤖 Processing ML for transaction: ${transactionId}`);
+
+//     const response = await axios.post(
+//       `${process.env.ML_SERVICE_URL}/predict`,
+//       {
+//         transactionId,
+//       }
+//     );
+
+//     console.log("✅ ML response received:", response.data);
+//   } catch (error) {
+//     console.error("❌ ML service error:", error.message);
+//   }
+// };
+
+// /* ============================= */
+// /*        WORKER LOOP            */
+// /* ============================= */
+
+// const startWorker = async () => {
+//   try {
+//     // ✅ VERY IMPORTANT: Connect Redis
+//     await connectRedis();
+
+//     console.log("🚀 ML Worker started...");
+
+//     while (true) {
+//       try {
+//         /* ====================================== */
+//         /* 🔥 BLOCKING POP (BEST PRACTICE)        */
+//         /* ====================================== */
+
+//         const result = await redisClient.brPop(QUEUE_NAME, 0);
+//         // result = { key: QUEUE_NAME, element: jobData }
+
+//         const jobData = result?.element;
+
+//         if (!jobData) continue;
+
+//         await callMLService(jobData);
+//       } catch (error) {
+//         console.error("❌ Worker loop error:", error);
+
+//         // small delay to prevent crash loop
+//         await new Promise((resolve) => setTimeout(resolve, 1000));
+//       }
+//     }
+//   } catch (error) {
+//     console.error("❌ Worker startup failed:", error);
+//     process.exit(1);
+//   }
+// };
+
+// /* ============================= */
+// /*        START WORKER           */
+// /* ============================= */
+
+// startWorker();
+
 import dotenv from "dotenv";
 dotenv.config();
+import connectMongo from "../config/mongo.js";
+import Transaction from "../models/Transaction.js";
 
-import redisClient, { connectRedis } from "../config/redis.js";
 import axios from "axios";
+import { connectRedis } from "../config/redis.js";
+import queueService from "../services/redisQueue.service.js";
 
-const QUEUE_NAME = "fraud_scoring_queue";
+const MAX_RETRIES = 3;
 
 /* ============================= */
 /*     CALL PYTHON ML SERVICE    */
 /* ============================= */
 
-const callMLService = async (jobData) => {
+const callMLService = async (transactionId) => {
+  const url = `${process.env.ML_SERVICE_URL}/predict`;
+
+  const response = await axios.post(url, {
+    transactionId,
+  });
+
+  return response.data;
+};
+
+/* ============================= */
+/*        PROCESS JOB            */
+/* ============================= */
+
+const processJob = async (job) => {
+  const { transactionId, attempt } = job;
+
   try {
-    const parsed = JSON.parse(jobData);
-    const { transactionId } = parsed;
+    console.log(`🚀 Processing ${transactionId}, attempt ${attempt}`);
 
-    if (!transactionId) {
-      console.warn("⚠️ Invalid job data:", jobData);
-      return;
-    }
+    await callMLService(transactionId);
 
-    console.log(`🤖 Processing ML for transaction: ${transactionId}`);
-
-    const response = await axios.post(
-      `${process.env.ML_SERVICE_URL}/predict`,
-      {
-        transactionId,
-      }
+    console.log(`✅ Success: ${transactionId}`);
+  } catch (error) {
+    console.error(
+      `❌ Error processing ${transactionId}:`,
+      error.message
     );
 
-    console.log("✅ ML response received:", response.data);
-  } catch (error) {
-    console.error("❌ ML service error:", error.message);
+    /* ============================= */
+    /* 🔁 RETRY LOGIC                */
+    /* ============================= */
+
+    if (attempt < MAX_RETRIES) {
+      const retryJob = {
+        ...job,
+        attempt: attempt + 1,
+      };
+
+      await queueService.pushToRetryQueue(retryJob);
+
+      console.log(
+        `🔁 Retrying ${transactionId}, attempt ${attempt + 1}`
+      );
+    } else {
+      /* ============================= */
+      /* 🚨 DEAD LETTER QUEUE          */
+      /* ============================= */
+
+      await queueService.pushToDLQ(job);
+      await Transaction.findByIdAndUpdate(job.transactionId, {
+        inDlq: true,
+        processingStage: "failed",
+        lastErrorMessage: error.message,
+      });
+
+      console.log(`🚨 Sent to DLQ: ${transactionId}`);
+    }
   }
 };
 
@@ -97,30 +217,28 @@ const callMLService = async (jobData) => {
 
 const startWorker = async () => {
   try {
-    // ✅ VERY IMPORTANT: Connect Redis
+    // ✅ Connect Redis once
     await connectRedis();
+    await connectMongo();
 
-    console.log("🚀 ML Worker started...");
+    console.log("🧠 ML Worker started...");
 
     while (true) {
       try {
-        /* ====================================== */
-        /* 🔥 BLOCKING POP (BEST PRACTICE)        */
-        /* ====================================== */
+        // 🔥 Get job (retry queue has priority)
+        const job = await queueService.popJob();
 
-        const result = await redisClient.brPop(QUEUE_NAME, 0);
-        // result = { key: QUEUE_NAME, element: jobData }
+        if (!job) {
+          // avoid CPU overuse
+          await new Promise((res) => setTimeout(res, 1000));
+          continue;
+        }
 
-        const jobData = result?.element;
-
-        if (!jobData) continue;
-
-        await callMLService(jobData);
+        await processJob(job);
       } catch (error) {
         console.error("❌ Worker loop error:", error);
 
-        // small delay to prevent crash loop
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await new Promise((res) => setTimeout(res, 1000));
       }
     }
   } catch (error) {
@@ -132,5 +250,6 @@ const startWorker = async () => {
 /* ============================= */
 /*        START WORKER           */
 /* ============================= */
+
 
 startWorker();

@@ -59,6 +59,11 @@ router.post(
   validateMiddleware,
   transactionController.createTransaction
 );
+router.get(
+  "/account/:id",
+  authMiddleware,
+  transactionController.getTransactionsByAccount
+);
 
 // (Future) Get all transactions
 // router.get("/", authMiddleware, transactionController.getTransactions);

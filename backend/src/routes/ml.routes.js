@@ -20,6 +20,14 @@ const router = express.Router();
 /* ============================= */
 
 // Python FastAPI will call this endpoint
-router.post("/result", mlController.handleMLResult);
+const mlAuthMiddleware = (req, res, next) => {
+  const secret = req.headers["x-service-secret"];
+  if (secret !== process.env.ML_SERVICE_SECRET) {
+    return res.status(401).json({ success: false, message: "Unauthorized" });
+  }
+  next();
+};
+router.post("/result", mlAuthMiddleware, mlController.handleMLResult);
+
 
 export default router;

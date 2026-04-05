@@ -28,10 +28,10 @@ const analystSchema = new mongoose.Schema(
       unique: true,
     },
     password: {
-  type: String,
-  required: true,
-  minlength: 6,
-},
+      type: String,
+      required: true,
+      minlength: 6,
+    },
 
     /* ============================= */
     /*       ACCOUNT STATUS          */
