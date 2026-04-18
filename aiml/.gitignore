@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IDEs
+.vscode/
+.idea/
+
+# Data files (Large files, raw data)
+data/*
+!data/.keep
+
+# Environment variables
+.env
+.env.local
+
+# Experiments outputs (optional)
+# experiments/*.png
+
+# NOTE: model weights (models/*.pkl, models/*.pt) are NOT ignored 
+# as per explicit instruction to keep them in Git for the handoff.

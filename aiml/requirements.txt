@@ -1,0 +1,31 @@
+# Core ML
+torch
+torchvision
+torchaudio
+
+# PyTorch Geometric (GNN)
+torch-geometric
+
+# Classical ML
+xgboost
+scikit-learn
+
+# Explainability
+shap
+
+# Data Processing
+pandas
+numpy
+
+# Graph Handling
+networkx
+neo4j
+
+# API Layer (later)
+fastapi
+uvicorn
+
+# Utilities
+python-dotenv
+tqdm
+matplotlib
