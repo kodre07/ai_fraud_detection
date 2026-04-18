@@ -162,7 +162,6 @@
 //   handleMLResult,
 // };
 
-
 import mlService from "../services/ml.service.js";
 
 /**
@@ -199,7 +198,6 @@ const handleMLResult = async (req, res, next) => {
       });
     }
 
-    // Prefer new score, fallback to aiScore
     const finalScore = score ?? aiScore;
 
     if (
@@ -209,7 +207,7 @@ const handleMLResult = async (req, res, next) => {
     ) {
       return res.status(400).json({
         success: false,
-        message: "score/aiScore must be a number between 0 and 1",
+        message: "score/aiScore must be between 0 and 1",
       });
     }
 
@@ -220,34 +218,51 @@ const handleMLResult = async (req, res, next) => {
     const result = await mlService.processMLResult({
       transactionId,
       score: finalScore,
-      riskLevel: risk_level,            // from router
-      methodUsed: method_used,          // from router
-      confidence: confidence_score,     // from router
-
-      // fallback (if Python still old)
-      aiScore: aiScore,
-
+      riskLevel: risk_level,
+      methodUsed: method_used,
+      confidence: confidence_score,
+      aiScore,
       shapExplanation,
       suspiciousPaths,
     });
 
     /* ============================= */
-    /* 3️⃣ REAL-TIME EMISSION 🔥      */
+    /* 3️⃣ REAL-TIME EVENTS 🔥        */
     /* ============================= */
 
     const io = req.app.get("io");
 
-    // Emit ML result
-    io.emit("ml_processed", {
-      transactionId: result.transaction._id,
-      fraudScore: result.transaction.fraudScore,
-      riskLevel: result.transaction.riskLevel,
-      methodUsed: result.transaction.scoringMethod,
-    });
+    if (io) {
+      // ✅ ML processed event
+      io.emit("ml_processed", {
+        transactionId: result.transaction._id,
+        fraudScore: result.transaction.fraudScore,
+        riskLevel: result.transaction.riskLevel,
+        methodUsed: result.transaction.scoringMethod,
+        confidence: result.transaction.confidence,
+      });
 
-    // Emit alert if created
-    if (result.alert) {
-      io.emit("fraud_alert", result.alert);
+      // ✅ Alert event
+      if (result.alert) {
+        io.emit("fraud_alert", {
+          alertId: result.alert._id,
+          accountId: result.alert.accountId,
+          riskLevel: result.alert.riskLevel,
+          fraudScore: result.alert.fraudScore,
+        });
+
+        // 🔥 NEW: CASE UPDATED EVENT (IMPORTANT)
+        io.emit("case_updated", {
+          caseId: result.alert.caseId,
+          alertId: result.alert._id,
+          accountId: result.alert.accountId,
+          riskLevel: result.alert.riskLevel,
+        });
+
+        console.log("📡 case_updated emitted");
+      }
+    } else {
+      console.warn("⚠️ Socket.io not initialized");
     }
 
     /* ============================= */

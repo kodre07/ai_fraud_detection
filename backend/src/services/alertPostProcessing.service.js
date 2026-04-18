@@ -1,3 +1,99 @@
+// // import Case from "../models/Case.js";
+
+// // /* ============================= */
+// // /*     HELPER: PRIORITY SCORE    */
+// // /* ============================= */
+
+// // const computePriority = (alerts) => {
+// //   if (!alerts.length) return 0;
+
+// //   // average fraud score
+// //   const avg =
+// //     alerts.reduce((sum, a) => sum + a.fraudScore, 0) /
+// //     alerts.length;
+
+// //   // boost for high count
+// //   return Number((avg + alerts.length * 0.05).toFixed(4));
+// // };
+
+// // /* ============================= */
+// // /*     MAIN PROCESS FUNCTION     */
+// // /* ============================= */
+
+// // const processAlert = async (alert) => {
+// //   try {
+// //     const accountId = alert.accountId;
+
+// //     /* ============================= */
+// //     /* 1️⃣ Find existing case        */
+// //     /* ============================= */
+
+// //     let existingCase = await Case.findOne({
+// //       accountId,
+// //       status: "open",
+// //     }).populate("alerts");
+
+// //     /* ============================= */
+// //     /* 2️⃣ Create new case if none   */
+// //     /* ============================= */
+
+// //     if (!existingCase) {
+// //       const newCase = await Case.create({
+// //         accountId,
+// //         alerts: [alert._id],
+// //         priorityScore: alert.fraudScore,
+// //         riskLevel: alert.riskLevel,
+// //       });
+
+// //       return newCase;
+// //     }
+
+// //     /* ============================= */
+// //     /* 3️⃣ Deduplication             */
+// //     /* ============================= */
+
+// //     const alreadyExists = existingCase.alerts.some(
+// //       (a) => a._id.toString() === alert._id.toString()
+// //     );
+
+// //     if (!alreadyExists) {
+// //       existingCase.alerts.push(alert);
+// //     }
+
+// //     /* ============================= */
+// //     /* 4️⃣ Update priority           */
+// //     /* ============================= */
+
+// //     const updatedAlerts = [...existingCase.alerts, alert];
+
+// //     existingCase.priorityScore = computePriority(updatedAlerts);
+
+// //     /* ============================= */
+// //     /* 5️⃣ Update risk level         */
+// //     /* ============================= */
+
+// //     const riskLevels = updatedAlerts.map((a) => a.riskLevel);
+
+// //     if (riskLevels.includes("critical")) {
+// //       existingCase.riskLevel = "critical";
+// //     } else if (riskLevels.includes("high")) {
+// //       existingCase.riskLevel = "high";
+// //     }
+
+// //     await existingCase.save();
+
+// //     return existingCase;
+// //   } catch (error) {
+// //     console.error("❌ Alert Post-Processing Error:", error);
+// //     throw error;
+// //   }
+// // };
+
+// // export default {
+// //   processAlert,
+// // };
+
+
 // import Case from "../models/Case.js";
 
 // /* ============================= */
@@ -7,12 +103,10 @@
 // const computePriority = (alerts) => {
 //   if (!alerts.length) return 0;
 
-//   // average fraud score
 //   const avg =
 //     alerts.reduce((sum, a) => sum + a.fraudScore, 0) /
 //     alerts.length;
 
-//   // boost for high count
 //   return Number((avg + alerts.length * 0.05).toFixed(4));
 // };
 
@@ -57,19 +151,26 @@
 //     );
 
 //     if (!alreadyExists) {
-//       existingCase.alerts.push(alert);
+//       // ✅ push ONLY ObjectId (correct way)
+//       existingCase.alerts.push(alert._id);
 //     }
 
 //     /* ============================= */
-//     /* 4️⃣ Update priority           */
+//     /* 4️⃣ Re-fetch populated alerts */
 //     /* ============================= */
 
-//     const updatedAlerts = [...existingCase.alerts, alert];
+//     await existingCase.populate("alerts");
+
+//     const updatedAlerts = existingCase.alerts; // ✅ FIXED (no duplication)
+
+//     /* ============================= */
+//     /* 5️⃣ Update priority           */
+//     /* ============================= */
 
 //     existingCase.priorityScore = computePriority(updatedAlerts);
 
 //     /* ============================= */
-//     /* 5️⃣ Update risk level         */
+//     /* 6️⃣ Update risk level         */
 //     /* ============================= */
 
 //     const riskLevels = updatedAlerts.map((a) => a.riskLevel);
@@ -78,7 +179,15 @@
 //       existingCase.riskLevel = "critical";
 //     } else if (riskLevels.includes("high")) {
 //       existingCase.riskLevel = "high";
+//     } else if (riskLevels.includes("medium")) {
+//       existingCase.riskLevel = "medium";
+//     } else {
+//       existingCase.riskLevel = "low";
 //     }
+
+//     /* ============================= */
+//     /* 7️⃣ Save case                 */
+//     /* ============================= */
 
 //     await existingCase.save();
 
@@ -92,7 +201,6 @@
 // export default {
 //   processAlert,
 // };
-
 
 import Case from "../models/Case.js";
 
@@ -119,79 +227,86 @@ const processAlert = async (alert) => {
     const accountId = alert.accountId;
 
     /* ============================= */
-    /* 1️⃣ Find existing case        */
+    /* 1️⃣ ATOMIC CASE FETCH/CREATE  */
     /* ============================= */
 
-    let existingCase = await Case.findOne({
-      accountId,
-      status: "open",
-    }).populate("alerts");
-
-    /* ============================= */
-    /* 2️⃣ Create new case if none   */
-    /* ============================= */
-
-    if (!existingCase) {
-      const newCase = await Case.create({
+    let caseDoc = await Case.findOneAndUpdate(
+      {
         accountId,
-        alerts: [alert._id],
-        priorityScore: alert.fraudScore,
-        riskLevel: alert.riskLevel,
-      });
-
-      return newCase;
-    }
+        status: "open",
+      },
+      {
+        $setOnInsert: {
+          accountId,
+          status: "open",
+          alerts: [],
+          priorityScore: alert.fraudScore,
+          riskLevel: alert.riskLevel,
+          createdAt: new Date(),
+        },
+      },
+      {
+        upsert: true,
+        new: true,
+      }
+    ).populate("alerts");
 
     /* ============================= */
-    /* 3️⃣ Deduplication             */
+    /* 2️⃣ Deduplication             */
     /* ============================= */
 
-    const alreadyExists = existingCase.alerts.some(
+    const alreadyExists = caseDoc.alerts.some(
       (a) => a._id.toString() === alert._id.toString()
     );
 
     if (!alreadyExists) {
-      // ✅ push ONLY ObjectId (correct way)
-      existingCase.alerts.push(alert._id);
+      caseDoc.alerts.push(alert._id);
     }
 
     /* ============================= */
-    /* 4️⃣ Re-fetch populated alerts */
+    /* 3️⃣ Re-fetch populated alerts */
     /* ============================= */
 
-    await existingCase.populate("alerts");
+    await caseDoc.populate("alerts");
 
-    const updatedAlerts = existingCase.alerts; // ✅ FIXED (no duplication)
-
-    /* ============================= */
-    /* 5️⃣ Update priority           */
-    /* ============================= */
-
-    existingCase.priorityScore = computePriority(updatedAlerts);
+    const updatedAlerts = caseDoc.alerts;
 
     /* ============================= */
-    /* 6️⃣ Update risk level         */
+    /* 4️⃣ Update priority           */
+    /* ============================= */
+
+    caseDoc.priorityScore = computePriority(updatedAlerts);
+
+    /* ============================= */
+    /* 5️⃣ Update risk level         */
     /* ============================= */
 
     const riskLevels = updatedAlerts.map((a) => a.riskLevel);
 
     if (riskLevels.includes("critical")) {
-      existingCase.riskLevel = "critical";
+      caseDoc.riskLevel = "critical";
     } else if (riskLevels.includes("high")) {
-      existingCase.riskLevel = "high";
+      caseDoc.riskLevel = "high";
     } else if (riskLevels.includes("medium")) {
-      existingCase.riskLevel = "medium";
+      caseDoc.riskLevel = "medium";
     } else {
-      existingCase.riskLevel = "low";
+      caseDoc.riskLevel = "low";
     }
 
     /* ============================= */
-    /* 7️⃣ Save case                 */
+    /* 6️⃣ Save case                 */
     /* ============================= */
 
-    await existingCase.save();
+    await caseDoc.save();
 
-    return existingCase;
+    /* ============================= */
+    /* 7️⃣ Link alert → case         */
+    /* ============================= */
+
+    alert.caseId = caseDoc._id;
+    await alert.save();
+
+    return caseDoc;
   } catch (error) {
     console.error("❌ Alert Post-Processing Error:", error);
     throw error;

@@ -1,123 +1,210 @@
 // import Transaction from "../models/Transaction.js";
 
-// /**
-//  * Detect shared device/IP usage
-//  * This exposes synthetic identity rings
-//  */
-// const resolve = async (transaction) => {
-//      console.log("🧠 Entity Resolution Triggered");
+// /* ============================= */
+// /* 🔥 HELPER: GOLDEN ID GENERATOR */
+// /* ============================= */
 
-//   try {
-//     const { senderId, deviceId, ipAddress } = transaction;
+// const generateGoldenId = (transaction, links) => {
+//   const identifiers = [
+//     transaction.deviceId,
+//     transaction.ipAddress,
+//     transaction.email?.toLowerCase(),
+//     transaction.phone,
+//   ]
+//     .filter(Boolean)
+//     .map((x) => x.toString())
+//     .sort();
 
-//     /* ============================= */
-//     /* 1️⃣ Shared Device Detection   */
-//     /* ============================= */
+//   const linkedIds = links
+//     .map((l) => l.linkedAccountId?.toString())
+//     .filter(Boolean)
+//     .sort();
 
-//     const deviceLinkedAccounts = await Transaction.find({
-//       deviceId,
-//       senderId: { $ne: senderId },
-//     }).distinct("senderId");
+//   const base = [...identifiers, ...linkedIds].join("_");
 
-//     if (deviceLinkedAccounts.length > 0) {
-//       console.log(
-//         `⚠️ Shared Device Detected for ${senderId}:`,
-//         deviceLinkedAccounts
-//       );
-//     }
-
-//     /* ============================= */
-//     /* 2️⃣ Shared IP Detection       */
-//     /* ============================= */
-
-//     const ipLinkedAccounts = await Transaction.find({
-//       ipAddress,
-//       senderId: { $ne: senderId },
-//     }).distinct("senderId");
-
-//     if (ipLinkedAccounts.length > 0) {
-//       console.log(
-//         `⚠️ Shared IP Detected for ${senderId}:`,
-//         ipLinkedAccounts
-//       );
-//     }
-
-//     return true;
-//   } catch (error) {
-//     console.error("❌ Entity resolution error:", error);
-//     throw error;
-//   }
+//   return base || `account_${transaction.senderId}`;
 // };
 
-// export default {
-//   resolve,
-// };
-
-
-// import Transaction from "../models/Transaction.js";
-
 // /**
-//  * Detect shared device/IP usage
-//  * Returns structured result for rule-based fraud scoring
+//  * Entity Resolution Service
+//  * Detect shared device/IP/email/phone usage + return structured links
 //  */
 // const resolve = async (transaction) => {
 //   console.log("🧠 Entity Resolution Triggered");
 
 //   try {
-//     const { senderId, deviceId, ipAddress } = transaction;
+//     let {
+//       senderId,
+//       deviceId,
+//       ipAddress,
+//       email,
+//       phone,
+//     } = transaction;
+
+//     // ✅ Normalize (VERY IMPORTANT)
+//     if (email) email = email.toLowerCase();
+//     if (ipAddress) ipAddress = ipAddress.trim();
 
 //     let ruleScore = 0;
+//     let links = [];
+//     const seen = new Set();
 
 //     /* ============================= */
 //     /* 1️⃣ Shared Device Detection   */
 //     /* ============================= */
 
-//     const deviceLinkedAccounts = await Transaction.find({
-//       deviceId,
-//       senderId: { $ne: senderId },
-//     }).distinct("senderId");
+//     if (deviceId) {
+//       const deviceLinkedAccounts = await Transaction.find({
+//         deviceId,
+//         senderId: { $ne: senderId },
+//       })
+//         .limit(10)
+//         .distinct("senderId");
 
-//     if (deviceLinkedAccounts.length > 0) {
-//       console.log(
-//         `⚠️ Shared Device Detected for ${senderId}:`,
-//         deviceLinkedAccounts
-//       );
+//       if (deviceLinkedAccounts.length > 0) {
+//         ruleScore += 0.4;
 
-//       ruleScore += 0.4;
+//         deviceLinkedAccounts.forEach((acc) => {
+//           const key = `DEVICE_${acc}`;
+//           if (!seen.has(key) && acc !== senderId) {
+//             seen.add(key);
+
+//             links.push({
+//               type: "SHARED_DEVICE",
+//               linkedAccountId: acc,
+//               confidence: Math.min(
+//                 0.9,
+//                 0.3 + deviceLinkedAccounts.length * 0.1
+//               ),
+//               linkValue: deviceId,
+//             });
+//           }
+//         });
+//       }
 //     }
 
 //     /* ============================= */
 //     /* 2️⃣ Shared IP Detection       */
 //     /* ============================= */
 
-//     const ipLinkedAccounts = await Transaction.find({
-//       ipAddress,
-//       senderId: { $ne: senderId },
-//     }).distinct("senderId");
+//     if (ipAddress) {
+//       const ipLinkedAccounts = await Transaction.find({
+//         ipAddress,
+//         senderId: { $ne: senderId },
+//       })
+//         .limit(10)
+//         .distinct("senderId");
 
-//     if (ipLinkedAccounts.length > 0) {
-//       console.log(
-//         `⚠️ Shared IP Detected for ${senderId}:`,
-//         ipLinkedAccounts
-//       );
+//       if (ipLinkedAccounts.length > 0) {
+//         ruleScore += 0.3;
 
-//       ruleScore += 0.4;
+//         ipLinkedAccounts.forEach((acc) => {
+//           const key = `IP_${acc}`;
+//           if (!seen.has(key) && acc !== senderId) {
+//             seen.add(key);
+
+//             links.push({
+//               type: "SHARED_IP",
+//               linkedAccountId: acc,
+//               confidence: Math.min(
+//                 0.8,
+//                 0.2 + ipLinkedAccounts.length * 0.1
+//               ),
+//               linkValue: ipAddress,
+//             });
+//           }
+//         });
+//       }
 //     }
 
 //     /* ============================= */
-//     /* 3️⃣ Normalize Score           */
+//     /* 3️⃣ Shared Email Detection 🔥 */
 //     /* ============================= */
 
-//     if (ruleScore > 1) ruleScore = 1;
+//     if (email) {
+//       const emailLinkedAccounts = await Transaction.find({
+//         email,
+//         senderId: { $ne: senderId },
+//       })
+//         .limit(10)
+//         .distinct("senderId");
+
+//       if (emailLinkedAccounts.length > 0) {
+//         ruleScore += 0.3;
+
+//         emailLinkedAccounts.forEach((acc) => {
+//           const key = `EMAIL_${acc}`;
+//           if (!seen.has(key) && acc !== senderId) {
+//             seen.add(key);
+
+//             links.push({
+//               type: "SHARED_EMAIL",
+//               linkedAccountId: acc,
+//               confidence: Math.min(
+//                 0.85,
+//                 0.3 + emailLinkedAccounts.length * 0.1
+//               ),
+//               linkValue: email,
+//             });
+//           }
+//         });
+//       }
+//     }
 
 //     /* ============================= */
-//     /* 4️⃣ Final Response            */
+//     /* 4️⃣ Shared Phone Detection 🔥 */
+//     /* ============================= */
+
+//     if (phone) {
+//       const phoneLinkedAccounts = await Transaction.find({
+//         phone,
+//         senderId: { $ne: senderId },
+//       })
+//         .limit(10)
+//         .distinct("senderId");
+
+//       if (phoneLinkedAccounts.length > 0) {
+//         ruleScore += 0.3;
+
+//         phoneLinkedAccounts.forEach((acc) => {
+//           const key = `PHONE_${acc}`;
+//           if (!seen.has(key) && acc !== senderId) {
+//             seen.add(key);
+
+//             links.push({
+//               type: "SHARED_PHONE",
+//               linkedAccountId: acc,
+//               confidence: Math.min(
+//                 0.85,
+//                 0.3 + phoneLinkedAccounts.length * 0.1
+//               ),
+//               linkValue: phone,
+//             });
+//           }
+//         });
+//       }
+//     }
+
+//     /* ============================= */
+//     /* 🔥 FINAL: NORMALIZE SCORE     */
+//     /* ============================= */
+
+//     ruleScore = Math.min(1, Number(ruleScore.toFixed(4)));
+
+//     /* ============================= */
+//     /* 🔥 GOLDEN RECORD             */
+//     /* ============================= */
+
+//     const goldenId = generateGoldenId(transaction, links);
+
+//     /* ============================= */
+//     /* FINAL RETURN                 */
 //     /* ============================= */
 
 //     return {
 //       ruleScore,
-//       deviceLinkedAccounts,
-//       ipLinkedAccounts,
+//       links,
+//       goldenId, // ✅ NEW (VERY IMPORTANT)
 //     };
 //   } catch (error) {
 //     console.error("❌ Entity resolution error:", error);
@@ -131,85 +218,235 @@
 
 import Transaction from "../models/Transaction.js";
 
+/* ============================= */
+/* 🔥 HELPER: GOLDEN ID GENERATOR */
+/* ============================= */
+
+const generateGoldenId = (transaction, links) => {
+  const identifiers = [
+    transaction.deviceId,
+    transaction.ipAddress,
+    transaction.email?.toLowerCase(),
+    transaction.phone,
+  ]
+    .filter(Boolean)
+    .map((x) => x.toString().trim())
+    .sort();
+
+  const linkedIds = links
+    .map((l) => l.linkedAccountId?.toString())
+    .filter(Boolean)
+    .sort();
+
+  const base = [...identifiers, ...linkedIds].join("_");
+
+  // ✅ Stable fallback
+  return base || `account_${transaction.senderId}`;
+};
+
+/* ============================= */
+/* 🔥 HELPER: FETCH LINKED IDS   */
+/* ============================= */
+
+const getLinkedAccounts = async (field, value, senderId) => {
+  if (!value) return [];
+
+  return Transaction.find({
+    [field]: value,
+    senderId: { $ne: senderId },
+  })
+    .limit(10)
+    .distinct("senderId");
+};
+
 /**
  * Entity Resolution Service
- * Detect shared device/IP usage + return structured links
  */
 const resolve = async (transaction) => {
   console.log("🧠 Entity Resolution Triggered");
 
   try {
-    const { senderId, deviceId, ipAddress } = transaction;
+    let {
+      senderId,
+      deviceId,
+      ipAddress,
+      email,
+      phone,
+    } = transaction;
+
+    /* ============================= */
+    /* 🔥 NORMALIZATION              */
+    /* ============================= */
+
+    if (email) email = email.toLowerCase().trim();
+    if (ipAddress) ipAddress = ipAddress.trim();
+    if (phone) phone = phone.toString().trim();
 
     let ruleScore = 0;
     let links = [];
+    const seen = new Set();
 
     /* ============================= */
-    /* 1️⃣ Shared Device Detection   */
+    /* 1️⃣ DEVICE                   */
     /* ============================= */
 
-    const deviceLinkedAccounts = await Transaction.find({
+    const deviceAccounts = await getLinkedAccounts(
+      "deviceId",
       deviceId,
-      senderId: { $ne: senderId },
-    }).distinct("senderId");
+      senderId
+    );
 
-    if (deviceLinkedAccounts.length > 0) {
+    if (deviceAccounts.length > 0) {
       ruleScore += 0.4;
 
-      deviceLinkedAccounts.forEach((acc) => {
+      deviceAccounts.forEach((acc) => {
+        if (!acc || acc === senderId) return;
+
+        const key = `DEVICE_${acc}`;
+        if (seen.has(key)) return;
+
+        seen.add(key);
+
         links.push({
           type: "SHARED_DEVICE",
           linkedAccountId: acc,
-          confidence: Math.min(0.9, 0.3 + deviceLinkedAccounts.length * 0.1),
+          confidence: Math.min(
+            0.9,
+            0.3 + deviceAccounts.length * 0.1
+          ),
           linkValue: deviceId,
         });
       });
     }
 
     /* ============================= */
-    /* 2️⃣ Shared IP Detection       */
+    /* 2️⃣ IP                       */
     /* ============================= */
 
-    const ipLinkedAccounts = await Transaction.find({
+    const ipAccounts = await getLinkedAccounts(
+      "ipAddress",
       ipAddress,
-      senderId: { $ne: senderId },
-    }).distinct("senderId");
+      senderId
+    );
 
-    if (ipLinkedAccounts.length > 0) {
-      ruleScore += 0.4;
+    if (ipAccounts.length > 0) {
+      ruleScore += 0.3;
 
-      ipLinkedAccounts.forEach((acc) => {
+      ipAccounts.forEach((acc) => {
+        if (!acc || acc === senderId) return;
+
+        const key = `IP_${acc}`;
+        if (seen.has(key)) return;
+
+        seen.add(key);
+
         links.push({
           type: "SHARED_IP",
           linkedAccountId: acc,
-          confidence: Math.min(0.8, 0.2 + ipLinkedAccounts.length * 0.1),
+          confidence: Math.min(
+            0.8,
+            0.2 + ipAccounts.length * 0.1
+          ),
           linkValue: ipAddress,
         });
       });
     }
-    if (transaction.email) {
-      const emailLinkedAccounts = await Transaction.find({
-        email: transaction.email,
-        senderId: { $ne: senderId },
-      }).distinct("senderId");
-      if (emailLinkedAccounts.length > 0) {
-        ruleScore = Math.min(1, ruleScore + 0.3);
-        emailLinkedAccounts.forEach((acc) => {
-          links.push({
-            type: "SHARED_EMAIL",
-            linkedAccountId: acc,
-            confidence: Math.min(0.95, 0.5 + emailLinkedAccounts.length * 0.1),
-            linkValue: transaction.email,
-          });
+
+    /* ============================= */
+    /* 3️⃣ EMAIL                    */
+    /* ============================= */
+
+    const emailAccounts = await getLinkedAccounts(
+      "email",
+      email,
+      senderId
+    );
+
+    if (emailAccounts.length > 0) {
+      ruleScore += 0.3;
+
+      emailAccounts.forEach((acc) => {
+        if (!acc || acc === senderId) return;
+
+        const key = `EMAIL_${acc}`;
+        if (seen.has(key)) return;
+
+        seen.add(key);
+
+        links.push({
+          type: "SHARED_EMAIL",
+          linkedAccountId: acc,
+          confidence: Math.min(
+            0.85,
+            0.3 + emailAccounts.length * 0.1
+          ),
+          linkValue: email,
         });
-      }
+      });
     }
 
-    if (ruleScore > 1) ruleScore = 1;
+    /* ============================= */
+    /* 4️⃣ PHONE                    */
+    /* ============================= */
+
+    const phoneAccounts = await getLinkedAccounts(
+      "phone",
+      phone,
+      senderId
+    );
+
+    if (phoneAccounts.length > 0) {
+      ruleScore += 0.3;
+
+      phoneAccounts.forEach((acc) => {
+        if (!acc || acc === senderId) return;
+
+        const key = `PHONE_${acc}`;
+        if (seen.has(key)) return;
+
+        seen.add(key);
+
+        links.push({
+          type: "SHARED_PHONE",
+          linkedAccountId: acc,
+          confidence: Math.min(
+            0.85,
+            0.3 + phoneAccounts.length * 0.1
+          ),
+          linkValue: phone,
+        });
+      });
+    }
+
+    /* ============================= */
+    /* 🔥 FINAL SCORE               */
+    /* ============================= */
+
+    ruleScore = Math.min(1, Number(ruleScore.toFixed(4)));
+
+    /* ============================= */
+    /* 🔥 GOLDEN RECORD             */
+    /* ============================= */
+
+    const goldenId = generateGoldenId(
+      {
+        deviceId,
+        ipAddress,
+        email,
+        phone,
+        senderId,
+      },
+      links
+    );
+
+    /* ============================= */
+    /* FINAL RETURN                 */
+    /* ============================= */
 
     return {
       ruleScore,
-      links, // 🔥 IMPORTANT
+      links,
+      goldenId,
     };
   } catch (error) {
     console.error("❌ Entity resolution error:", error);
