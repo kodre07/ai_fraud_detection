@@ -774,8 +774,10 @@ const processMLResult = async ({
     /* ============================= */
 
     const finalScore = score ?? aiScore;
-    const finalRiskLevel = riskLevel ?? null;
-    const finalMethod = methodUsed ?? "tabular_only";
+    // ✅ Defensive: lowercase so uppercase from Python ("HIGH") never breaks Mongoose enum
+    const finalRiskLevel = riskLevel ? riskLevel.toLowerCase() : null;
+    // ✅ "tabular_only" removed from enum — use "xgboost" as fallback (matches scorer output)
+    const finalMethod = methodUsed ?? "xgboost";
     const finalConfidence = confidence ?? null;
 
     /* ============================= */
@@ -795,12 +797,11 @@ const processMLResult = async ({
     );
 
     /* ============================= */
-    /* 5️⃣ GOLDEN RECORD 🔥          */
+    /* 5️⃣ GOLDEN RECORD NOTE 🔥     */
     /* ============================= */
-
-    if (transaction.entityResolution?.goldenId) {
-      transaction.goldenId = transaction.entityResolution.goldenId;
-    }
+    /* goldenId is set at ingestion time (transaction.service.js → entityResolution).
+     * entityResolution.goldenId was removed from the schema — it only lives at
+     * the top-level transaction.goldenId field now. No copy needed here. */
 
     /* ============================= */
     /* 6️⃣ Store Explainability      */
@@ -856,35 +857,49 @@ const processMLResult = async ({
     );
 
     /* ============================= */
-    /* 1️⃣1️⃣ CREATE ALERT           */
+    /* 1️⃣1️⃣ CREATE ALERT (IDEMPOTENT) */
     /* ============================= */
 
     let alert = null;
 
     if (["high", "critical"].includes(transaction.riskLevel)) {
-      const existingAlert = await Alert.findOne({
-        transactionId: transaction._id,
-      });
+      /* ✅ FIX 3: Atomic upsert — eliminates race window between findOne + create.
+       * The unique index on alerts.transactionId is the final DB-level guard.
+       * new:true returns the doc regardless of whether it was inserted or matched. */
+      const alertDoc = await Alert.findOneAndUpdate(
+        { transactionId: transaction._id },          // match
+        {
+          $setOnInsert: {                            // only written on INSERT (not on match)
+            transactionId: transaction._id,
+            accountId: transaction.senderId,
+            fraudScore: transaction.fraudScore,
+            riskLevel: transaction.riskLevel,
+            status: "open",
+            explanation: shapExplanation,
+            suspiciousPaths,
+            methodUsed: transaction.scoringMethod,
+            confidence: transaction.confidence,
+          },
+        },
+        { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
+      );
 
-      if (!existingAlert) {
-        alert = await Alert.create({
-          transactionId: transaction._id,
-          accountId: transaction.senderId,
-          fraudScore: transaction.fraudScore,
-          riskLevel: transaction.riskLevel,
-          status: "open",
-          explanation: shapExplanation,
-          suspiciousPaths,
-          methodUsed: transaction.scoringMethod,
-          confidence: transaction.confidence,
-        });
+      const wasInserted = alertDoc.createdAt?.getTime() === alertDoc.updatedAt?.getTime();
 
-        /* ✅ FIX: Save flag directly (no extra query needed) */
+      if (wasInserted) {
+        alert = alertDoc;
+
         transaction.alertCreated = true;
         await transaction.save();
 
-        /* 🔥 CASE GROUPING */
+        /* 🔥 CASE GROUPING — only runs once per alert */
         await alertPostProcessingService.processAlert(alert);
+      } else {
+        // Alert already existed — return it so the caller can emit the socket event
+        alert = alertDoc;
+        console.log(
+          `ℹ️  Alert already exists for transaction ${transaction._id} — skipping duplicate`
+        );
       }
     }
 

@@ -428,8 +428,21 @@ const processTransaction = async (data) => {
 
     const normalizedData = {
       ...data,
-      email: data.email?.toLowerCase(),
-      ipAddress: data.ipAddress?.trim(),
+      // existing normalizations
+      email: data.email?.toLowerCase().trim() ?? null,
+      ipAddress: data.ipAddress?.trim() ?? null,
+      phone: data.phone?.toString().trim() ?? null,
+
+      // enrichment fields — coerce types so a test script sending "true"/1 still works
+      isVpn: data.isVpn === true || data.isVpn === "true" || false,
+      isProxy: data.isProxy === true || data.isProxy === "true" || false,
+      ipCountry: data.ipCountry ? String(data.ipCountry).trim().toUpperCase() : null,
+      accountCountry: data.accountCountry ? String(data.accountCountry).trim().toUpperCase() : null,
+
+      // optional metadata
+      currency: data.currency ?? null,
+      merchantCategory: data.merchantCategory ?? null,
+      userAgent: data.userAgent ?? null,
     };
 
     /* ============================= */
@@ -444,6 +457,18 @@ const processTransaction = async (data) => {
       ipAddress: normalizedData.ipAddress,
       email: normalizedData.email,
       phone: normalizedData.phone,
+
+      // ✅ Enrichment fields — now persisted so the AI scorer can use them
+      isVpn: normalizedData.isVpn,
+      isProxy: normalizedData.isProxy,
+      ipCountry: normalizedData.ipCountry,
+      accountCountry: normalizedData.accountCountry,
+
+      // optional metadata
+      currency: normalizedData.currency,
+      merchantCategory: normalizedData.merchantCategory,
+      userAgent: normalizedData.userAgent,
+
       timestamp: normalizedData.timestamp || new Date(),
     });
 
@@ -464,7 +489,7 @@ const processTransaction = async (data) => {
 
     transaction.entityResolution = {
       ruleScore,
-      goldenId,
+      // goldenId lives at the top level — NOT inside entityResolution anymore
       links,
       maxLinkConfidence:
         links.length > 0
@@ -482,7 +507,76 @@ const processTransaction = async (data) => {
     transaction.processingStage = "entity_resolved";
 
     /* ============================= */
-    /* 4️⃣ RULE-BASED RISK           */
+    /* 4️⃣ BEHAVIORAL FEATURES       */
+    /* ============================= */
+    /* Compute lightweight behavioral signals from existing transaction history.
+     * All queries are optional — any failure is swallowed so the pipeline continues. */
+
+    try {
+      const now = new Date();
+      const oneHourAgo = new Date(now - 1 * 60 * 60 * 1000);
+      const oneDayAgo = new Date(now - 24 * 60 * 60 * 1000);
+      const sevenDayAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
+
+      const senderId = transaction.senderId;
+
+      // Count of prior transactions for this sender in the last 1h / 24h
+      const [count1h, count24h] = await Promise.all([
+        Transaction.countDocuments({ senderId, timestamp: { $gte: oneHourAgo }, _id: { $ne: transaction._id } }),
+        Transaction.countDocuments({ senderId, timestamp: { $gte: oneDayAgo }, _id: { $ne: transaction._id } }),
+      ]);
+
+      // 7-day average amount for this sender
+      const recent7d = await Transaction.find(
+        { senderId, timestamp: { $gte: sevenDayAgo }, _id: { $ne: transaction._id } },
+        { amount: 1 }
+      ).limit(100).lean();
+
+      const avg7d = recent7d.length > 0
+        ? recent7d.reduce((s, t) => s + t.amount, 0) / recent7d.length
+        : 0;
+
+      const deviation = avg7d > 0
+        ? Math.abs(transaction.amount - avg7d) / avg7d
+        : 0;
+
+      // First transaction ever for this sender?
+      const priorCount = await Transaction.countDocuments({
+        senderId,
+        _id: { $ne: transaction._id },
+      });
+
+      // New device? (this device never seen before for this sender)
+      const deviceSeen = transaction.deviceId
+        ? await Transaction.exists({
+          senderId,
+          deviceId: transaction.deviceId,
+          _id: { $ne: transaction._id },
+        })
+        : null;
+
+      // New IP?
+      const ipSeen = transaction.ipAddress
+        ? await Transaction.exists({
+          senderId,
+          ipAddress: transaction.ipAddress,
+          _id: { $ne: transaction._id },
+        })
+        : null;
+
+      transaction.isFirstTransaction = priorCount === 0;
+      transaction.isNewDevice = !deviceSeen;
+      transaction.isNewIp = !ipSeen;
+      transaction.transactionCount1h = count1h;
+      transaction.transactionCount24h = count24h;
+      transaction.avgAmount7d = Number(avg7d.toFixed(4));
+      transaction.amountDeviation = Number(deviation.toFixed(4));
+    } catch (behavioralErr) {
+      console.warn("⚠️ Behavioral feature computation skipped:", behavioralErr.message);
+    }
+
+    /* ============================= */
+    /* 5️⃣ RULE-BASED RISK           */
     /* ============================= */
 
     if (ruleScore >= 0.5) {

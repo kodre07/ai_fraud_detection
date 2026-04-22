@@ -247,7 +247,7 @@ const processAlert = async (alert) => {
       },
       {
         upsert: true,
-        new: true,
+        returnDocument: "after",
       }
     ).populate("alerts");
 

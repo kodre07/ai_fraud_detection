@@ -1,31 +1,39 @@
-# Core ML
-torch
-torchvision
-torchaudio
+# ─── Core ML (heavy — comment out if not needed for local scoring tests) ──────
+# torch
+# torchvision
+# torchaudio
+# torch-geometric
 
-# PyTorch Geometric (GNN)
-torch-geometric
-
-# Classical ML
+# ─── Classical ML ─────────────────────────────────────────────────────────────
 xgboost
 scikit-learn
 
-# Explainability
+# ─── Explainability ───────────────────────────────────────────────────────────
 shap
 
-# Data Processing
+# ─── Data Processing ──────────────────────────────────────────────────────────
 pandas
 numpy
 
-# Graph Handling
+# ─── Graph (in-memory research graph) ─────────────────────────────────────────
 networkx
-neo4j
 
-# API Layer (later)
+# ─── Graph DB ─────────────────────────────────────────────────────────────────
+neo4j                  # async Neo4j driver (AsyncGraphDatabase)
+
+# ─── API Layer ────────────────────────────────────────────────────────────────
 fastapi
-uvicorn
+uvicorn[standard]      # includes websockets + httptools
 
-# Utilities
-python-dotenv
+# ─── Async DB Clients ─────────────────────────────────────────────────────────
+redis[hiredis]         # redis.asyncio (async Redis client)
+motor                  # async MongoDB driver (Motor)
+
+# ─── Async HTTP (callback to Node.js) ─────────────────────────────────────────
+httpx                  # used in worker.py to POST /api/ml/result
+
+# ─── Utilities ────────────────────────────────────────────────────────────────
+python-dotenv          # load .env
 tqdm
 matplotlib
+joblib

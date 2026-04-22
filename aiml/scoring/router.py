@@ -5,7 +5,31 @@ import pickle
 import networkx as nx
 import shap
 import joblib
+import concurrent.futures
 from graph.extractor import generate_embedding_real
+
+# ✅ Fix 5 — Neo4j / graph-density timeout (400 ms)
+# If get_graph_density_signal does not return within NEO4J_TIMEOUT_S seconds
+# (e.g. Neo4j is slow, unavailable, or the in-memory graph is huge), we fall
+# back to the XGBoost path rather than blocking the entire worker loop.
+NEO4J_TIMEOUT_S = 0.4   # 400 ms — adjust if graph is very large
+
+def _get_graph_density_safe(tx_id: str) -> int:
+    """
+    Wraps get_graph_density_signal with a hard wall-clock timeout.
+    Returns -1 as a sentinel on timeout or any exception so the caller
+    can safely route to the XGBoost fallback.
+    """
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(get_graph_density_signal, tx_id)
+            return future.result(timeout=NEO4J_TIMEOUT_S)
+    except concurrent.futures.TimeoutError:
+        print(f"⚠️  Neo4j/graph timeout ({NEO4J_TIMEOUT_S}s) for {tx_id} — routing to XGBoost fallback")
+        return -1
+    except Exception as exc:
+        print(f"⚠️  Neo4j/graph error for {tx_id}: {exc} — routing to XGBoost fallback")
+        return -1
 
 # Load everything once (important for performance)
 with open("models/hybrid_xgb.pkl", "rb") as f:
@@ -33,22 +57,23 @@ def process_transaction(transaction):
     subgraph = get_subgraph(transaction)
     tx_id = f"T_{transaction['TransactionID']}"
         # Graph signal for routing
-    graph_context_count = get_graph_density_signal(tx_id)
+    graph_context_count = _get_graph_density_safe(tx_id)  # ✅ Fix 5: timeout-guarded call
     print("Graph context count:", graph_context_count)
 
-    # PATH A — RULE BASED (cold start)
-    if graph_context_count == 0:
+    # PATH A — RULE BASED (cold start / no graph context, OR Neo4j timeout sentinel)
+    if graph_context_count <= 0:   # 0 = no history; -1 = timeout/error sentinel
         fraud_score = rule_based_score(transaction)
         fraud_paths = get_fraud_paths(transaction, max_hops=2)
 
         return {
             "fraud_score": fraud_score,
+            "method": "rule_based",          # ✅ Fix 4: honest label
             "top_features": ["Rule-based scoring"],
             "graph_insights": ["New or isolated account"],
             "fraud_paths": fraud_paths
         }
 
-    # PATH B — TABULAR + weak embedding
+    # PATH B — TABULAR + weak graph embedding (xgboost)
     elif graph_context_count <= 2:
         embedding = generate_embedding_real(subgraph, f"T_{transaction['TransactionID']}")
         final_features = np.concatenate([features, embedding * 0.1])
@@ -57,12 +82,13 @@ def process_transaction(transaction):
 
         return {
             "fraud_score": float(fraud_score),
+            "method": "xgboost",             # ✅ Fix 4: honest label (tabular model)
             "top_features": get_shap_explanation(final_features),
             "graph_insights": ["Limited graph information"],
             "fraud_paths": fraud_paths
         }
 
-    # PATH C — FULL HYBRID
+    # PATH C — GNN HYBRID SLOT (falls back to XGBoost until GNN is trained)
     else:
         embedding = generate_embedding_real(subgraph, f"T_{transaction['TransactionID']}")
         final_features = np.concatenate([features, embedding])
@@ -71,6 +97,10 @@ def process_transaction(transaction):
 
         return {
             "fraud_score": float(fraud_score),
+            # ✅ Fix 4: "gnn_hybrid_fallback" — GNN slot is active but uses XGBoost
+            # internally until dedicated GNN weights are available. Replace with
+            # "gnn_hybrid" once a trained GNN model is loaded.
+            "method": "gnn_hybrid_fallback",
             "top_features": get_shap_explanation(final_features),
             "graph_insights": get_graph_insights(transaction),
             "fraud_paths": fraud_paths

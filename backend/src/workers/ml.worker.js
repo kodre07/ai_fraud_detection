@@ -137,119 +137,26 @@
 
 import dotenv from "dotenv";
 dotenv.config();
-import connectMongo from "../config/mongo.js";
-import Transaction from "../models/Transaction.js";
 
-import axios from "axios";
-import { connectRedis } from "../config/redis.js";
-import queueService from "../services/redisQueue.service.js";
+/* ===========================================================================================
+ * ⚠️  NODE.JS IS A PRODUCER ONLY — THIS FILE NO LONGER RUNS A CONSUMER LOOP
+ *
+ * Architecture decision (Fix 1 + Fix 2):
+ *   - Redis jobs are pushed by: transaction.service.js → redisQueue.service.js
+ *   - Redis jobs are consumed by: Python AI service (aiml/worker.py)
+ *   - Running a Node.js consumer HERE caused duplicate processing / race conditions
+ *
+ * The /predict HTTP path is also disabled:
+ *   - Python fetches jobs from Redis directly; nothing calls /predict in production
+ *   - /predict remains available in Python as a DEBUG-ONLY endpoint
+ *
+ * Queue constant reference (shared with redisQueue.service.js):
+ *   MAIN  : fraud_scoring_queue
+ *   RETRY : fraud_scoring_retry_queue
+ *   DLQ   : fraud_scoring_dlq
+ * =========================================================================================== */
 
-const MAX_RETRIES = 3;
-
-/* ============================= */
-/*     CALL PYTHON ML SERVICE    */
-/* ============================= */
-
-const callMLService = async (transactionId) => {
-  const url = `${process.env.ML_SERVICE_URL}/predict`;
-
-  const response = await axios.post(url, {
-    transactionId,
-  });
-
-  return response.data;
-};
-
-/* ============================= */
-/*        PROCESS JOB            */
-/* ============================= */
-
-const processJob = async (job) => {
-  const { transactionId, attempt } = job;
-
-  try {
-    console.log(`🚀 Processing ${transactionId}, attempt ${attempt}`);
-
-    await callMLService(transactionId);
-
-    console.log(`✅ Success: ${transactionId}`);
-  } catch (error) {
-    console.error(
-      `❌ Error processing ${transactionId}:`,
-      error.message
-    );
-
-    /* ============================= */
-    /* 🔁 RETRY LOGIC                */
-    /* ============================= */
-
-    if (attempt < MAX_RETRIES) {
-      const retryJob = {
-        ...job,
-        attempt: attempt + 1,
-      };
-
-      await queueService.pushToRetryQueue(retryJob);
-
-      console.log(
-        `🔁 Retrying ${transactionId}, attempt ${attempt + 1}`
-      );
-    } else {
-      /* ============================= */
-      /* 🚨 DEAD LETTER QUEUE          */
-      /* ============================= */
-
-      await queueService.pushToDLQ(job);
-      await Transaction.findByIdAndUpdate(job.transactionId, {
-        inDlq: true,
-        processingStage: "failed",
-        lastErrorMessage: error.message,
-      });
-
-      console.log(`🚨 Sent to DLQ: ${transactionId}`);
-    }
-  }
-};
-
-/* ============================= */
-/*        WORKER LOOP            */
-/* ============================= */
-
-const startWorker = async () => {
-  try {
-    // ✅ Connect Redis once
-    await connectRedis();
-    await connectMongo();
-
-    console.log("🧠 ML Worker started...");
-
-    while (true) {
-      try {
-        // 🔥 Get job (retry queue has priority)
-        const job = await queueService.popJob();
-
-        if (!job) {
-          // avoid CPU overuse
-          await new Promise((res) => setTimeout(res, 1000));
-          continue;
-        }
-
-        await processJob(job);
-      } catch (error) {
-        console.error("❌ Worker loop error:", error);
-
-        await new Promise((res) => setTimeout(res, 1000));
-      }
-    }
-  } catch (error) {
-    console.error("❌ Worker startup failed:", error);
-    process.exit(1);
-  }
-};
-
-/* ============================= */
-/*        START WORKER           */
-/* ============================= */
-
-
-startWorker();
+console.log(
+  "ℹ️  ml.worker.js loaded — Node.js is producer-only. " +
+  "Redis consumption is handled exclusively by the Python AI service."
+);
