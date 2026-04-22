@@ -150,7 +150,14 @@
 //   createTransaction,
 // };
 
+import fs from "fs";
+import path from "path";
+import { createReadStream } from "fs";
+import csvParser from "csv-parser";
 import transactionService from "../services/transaction.service.js";
+
+/* Alias for clarity inside uploadTransactions */
+const createTransactionService = transactionService.processTransaction;
 
 /* ========================================= */
 /*         CREATE TRANSACTION                */
@@ -232,7 +239,131 @@ const getTransactionsByAccount = async (req, res, next) => {
   }
 };
 
+/* ========================================= */
+/*         UPLOAD TRANSACTIONS (CSV)         */
+/* ========================================= */
+
+const uploadTransactions = async (req, res, next) => {
+  /* ── 1. Guard: file must exist ─────────────────────────── */
+  if (!req.file) {
+    return res.status(400).json({
+      success: false,
+      message: "No file uploaded. Use field name \"file\".",
+    });
+  }
+
+  const filePath = req.file.path;
+  console.log(`\n📂 CSV Upload started — file: ${req.file.originalname} (${req.file.size} bytes)`);
+
+  let total = 0;
+  let processed = 0;
+  let failed = 0;
+  const errors = [];
+
+  try {
+    /* ── 2. Parse all rows from CSV ────────────────────────── */
+    const rows = await new Promise((resolve, reject) => {
+      const collected = [];
+      createReadStream(filePath)
+        .pipe(csvParser())
+        .on("data", (row) => collected.push(row))
+        .on("end", () => resolve(collected))
+        .on("error", (err) => reject(err));
+    });
+
+    total = rows.length;
+    console.log(`📋 Total rows parsed from CSV: ${total}`);
+
+    /* ── 3. Process each row sequentially ──────────────────── */
+    for (const [index, row] of rows.entries()) {
+      try {
+        /* -- Type conversion (CSV values are all strings) -- */
+        const transformedRow = {
+          senderId: row.senderId?.trim() || null,
+          receiverId: row.receiverId?.trim() || null,
+          amount: row.amount ? Number(row.amount) : null,
+
+          /* Optional network / device signals */
+          deviceId: row.deviceId?.trim() || null,
+          ipAddress: row.ipAddress?.trim() || null,
+
+          /* Boolean coercions */
+          isVpn: row.isVpn === "true",
+          isProxy: row.isProxy === "true",
+
+          /* Geo / country codes */
+          ipCountry: row.ipCountry?.trim().toUpperCase() || null,
+          accountCountry: row.accountCountry?.trim().toUpperCase() || null,
+
+          /* Contact signals */
+          email: row.email?.trim() || null,
+          phone: row.phone?.trim() || null,
+
+          /* Optional metadata */
+          currency: row.currency?.trim() || null,
+          merchantCategory: row.merchantCategory?.trim() || null,
+          userAgent: row.userAgent?.trim() || null,
+
+          /* Timestamp (ISO string → Date, or let service default to now) */
+          timestamp: row.timestamp ? new Date(row.timestamp) : undefined,
+        };
+
+        /* -- Minimal validation: skip rows missing required fields -- */
+        if (!transformedRow.senderId || !transformedRow.receiverId || !transformedRow.amount) {
+          throw new Error(
+            `Row ${index + 1}: Missing required fields (senderId, receiverId, amount). ` +
+            `Got: senderId=${transformedRow.senderId}, receiverId=${transformedRow.receiverId}, amount=${transformedRow.amount}`
+          );
+        }
+
+        if (isNaN(transformedRow.amount) || transformedRow.amount <= 0) {
+          throw new Error(`Row ${index + 1}: Invalid amount "${row.amount}" — must be a positive number.`);
+        }
+
+        /* -- Run the FULL pipeline via existing service -- */
+        await createTransactionService(transformedRow);
+
+        processed += 1;
+        console.log(`  ✅ Row ${index + 1}/${total} processed (sender: ${transformedRow.senderId})`);
+
+      } catch (rowErr) {
+        failed += 1;
+        const errMsg = rowErr?.message || String(rowErr);
+        errors.push({ row: index + 1, error: errMsg });
+        console.error(`  ❌ Row ${index + 1}/${total} FAILED: ${errMsg}`);
+        /* Continue with the next row — do NOT crash the upload */
+      }
+    }
+
+    /* ── 4. Final summary log ───────────────────────────────── */
+    console.log(`\n📊 Upload complete — total: ${total} | processed: ${processed} | failed: ${failed}\n`);
+
+    return res.status(200).json({
+      success: true,
+      total,
+      processed,
+      failed,
+      ...(errors.length > 0 && { rowErrors: errors }),
+    });
+
+  } catch (err) {
+    console.error("❌ CSV Upload fatal error:", err);
+    next(err);
+  } finally {
+    /* ── 5. Always delete the temp file ─────────────────────── */
+    try {
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        console.log(`🗑️  Temp file deleted: ${filePath}`);
+      }
+    } catch (cleanupErr) {
+      console.warn("⚠️  Could not delete temp file:", cleanupErr.message);
+    }
+  }
+};
+
 export default {
   createTransaction,
   getTransactionsByAccount,
+  uploadTransactions,
 };

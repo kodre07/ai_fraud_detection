@@ -106,6 +106,7 @@
 // backend/src/routes/transaction.routes.js
 
 import express from "express";
+import multer from "multer";
 import transactionController from "../controllers/transaction.controller.js";
 import { createTransactionValidation } from "../middlewares/transactionValidation.middleware.js";
 import validateMiddleware from "../middlewares/validate.middleware.js";
@@ -113,6 +114,9 @@ import authMiddleware from "../middlewares/auth.middleware.js";
 import rateLimitMiddleware from "../middlewares/rateLimit.middleware.js";
 
 const router = express.Router();
+
+/* ── Multer: store uploads to disk ──────────────────────────── */
+const upload = multer({ dest: "uploads/" });
 
 /* ============================= */
 /*     TRANSACTION ROUTES        */
@@ -133,6 +137,22 @@ router.get(
   "/account/:id",
   authMiddleware,
   transactionController.getTransactionsByAccount
+);
+
+/* ============================= */
+/*   CSV BATCH UPLOAD ROUTE      */
+/* ============================= */
+
+// 📂 POST /api/transactions/upload
+// Accepts a multipart/form-data file field named "file".
+// Processes each CSV row through the full fraud pipeline.
+// Note: auth is intentionally omitted here so batch imports
+//       (e.g. from internal scripts) can run without a token.
+//       Add authMiddleware before upload.single() if you want protection.
+router.post(
+  "/upload",
+  upload.single("file"),
+  transactionController.uploadTransactions
 );
 
 export default router;
