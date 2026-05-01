@@ -11,9 +11,7 @@ class GraphSAGE(nn.Module):
     def forward(self, x, edge_index):
         x = self.conv1(x, edge_index)
         x = torch.relu(x)
-
         embedding = x  # 64-dim
-
         x = self.conv2(x, edge_index)
 
         return x, embedding

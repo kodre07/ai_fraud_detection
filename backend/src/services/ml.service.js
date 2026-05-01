@@ -807,13 +807,28 @@ const processMLResult = async ({
     /* 6️⃣ Store Explainability      */
     /* ============================= */
 
+    // shapExplanation from the Python scorer (v2) is a rich object:
+    //   { shapValues: [{feature, actual_value, contribution, direction, reason},...],
+    //     topReason: "...",  netContribution: "..." }
+    // For backward-compat we also handle the old flat {feature: weight} dict.
     if (shapExplanation && typeof shapExplanation === "object") {
-      transaction.explanation.shapValues = Object.entries(
-        shapExplanation
-      ).map(([feature, value]) => ({
-        feature,
-        value,
-      }));
+      if (Array.isArray(shapExplanation.shapValues)) {
+        // ✅ New rich format from scorer v2
+        transaction.explanation.shapValues = shapExplanation.shapValues.map((s) => ({
+          feature:       s.feature       ?? "",
+          value:         s.contribution  ?? 0,   // keep schema-compatible 'value' field
+          actual_value:  s.actual_value  ?? null,
+          direction:     s.direction     ?? "fraud",
+          reason:        s.reason        ?? "",
+        }));
+        transaction.explanation.topReason       = shapExplanation.topReason       ?? "";
+        transaction.explanation.netContribution = shapExplanation.netContribution ?? "";
+      } else {
+        // ⬇️ Backward-compat: old flat dict { feature: weight }
+        transaction.explanation.shapValues = Object.entries(shapExplanation).map(
+          ([feature, value]) => ({ feature, value })
+        );
+      }
     }
 
     transaction.explanation.suspiciousPaths = (suspiciousPaths || []).map(
@@ -866,6 +881,14 @@ const processMLResult = async ({
       /* ✅ FIX 3: Atomic upsert — eliminates race window between findOne + create.
        * The unique index on alerts.transactionId is the final DB-level guard.
        * new:true returns the doc regardless of whether it was inserted or matched. */
+      // Build alert explanation: store the full rich explanation object
+      // so the analyst dashboard can show actual_value, reason, topReason, etc.
+      const alertExplanation = {
+        shapValues:      transaction.explanation.shapValues      ?? [],
+        topReason:       transaction.explanation.topReason       ?? "",
+        netContribution: transaction.explanation.netContribution ?? "",
+      };
+
       const alertDoc = await Alert.findOneAndUpdate(
         { transactionId: transaction._id },          // match
         {
@@ -875,7 +898,7 @@ const processMLResult = async ({
             fraudScore: transaction.fraudScore,
             riskLevel: transaction.riskLevel,
             status: "open",
-            explanation: shapExplanation,
+            explanation: alertExplanation,
             suspiciousPaths,
             methodUsed: transaction.scoringMethod,
             confidence: transaction.confidence,
@@ -884,9 +907,13 @@ const processMLResult = async ({
         { upsert: true, returnDocument: "after", setDefaultsOnInsert: true }
       );
 
-      const wasInserted = alertDoc.createdAt?.getTime() === alertDoc.updatedAt?.getTime();
+      // ✅ RELIABLE: a fresh insert will have createdAt within the last 2 seconds
+      const freshlyInserted =
+        alertDoc &&
+        alertDoc.createdAt &&
+        Date.now() - alertDoc.createdAt.getTime() < 2000;
 
-      if (wasInserted) {
+      if (freshlyInserted) {
         alert = alertDoc;
 
         transaction.alertCreated = true;

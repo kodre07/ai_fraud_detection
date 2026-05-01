@@ -23,7 +23,11 @@ const scoreHistorySchema = new mongoose.Schema(
 
     methodUsed: {
       type: String,
-      enum: ["rule_based", "tabular_only", "gnn_hybrid"],
+      // Must stay in sync with:
+      //   Transaction.scoringMethod
+      //   Alert.methodUsed
+      //   Python scorer: scoring/scorer.py route()
+      enum: ["rule_based", "xgboost", "gnn_hybrid_fallback"],
       default: null,
     },
 

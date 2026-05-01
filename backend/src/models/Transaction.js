@@ -970,8 +970,12 @@ const entityLinkSchema = new mongoose.Schema(
 
 const shapValueSchema = new mongoose.Schema(
   {
-    feature: { type: String, required: true },
-    value: { type: Number, required: true },
+    feature:      { type: String, required: true },
+    value:        { type: Number, required: true },      // contribution weight
+    // ✅ Scorer v2 rich explanation fields
+    actual_value: { type: mongoose.Schema.Types.Mixed, default: null }, // real tx value
+    direction:    { type: String, enum: ["fraud", "safe"], default: "fraud" },
+    reason:       { type: String, default: "" },         // human-readable sentence
   },
   { _id: false }
 );
@@ -1119,9 +1123,10 @@ const transactionSchema = new mongoose.Schema(
 
     /* EXPLANATION */
     explanation: {
-      shapValues: { type: [shapValueSchema], default: [] },
-      suspiciousPaths: { type: [suspiciousPathSchema], default: [] },
-      topReason: { type: String, default: null },
+      shapValues:       { type: [shapValueSchema], default: [] },
+      suspiciousPaths:  { type: [suspiciousPathSchema], default: [] },
+      topReason:        { type: String, default: null },
+      netContribution:  { type: String, default: null }, // scorer v2 summary string
     },
 
     /* PIPELINE */

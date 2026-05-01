@@ -43,13 +43,12 @@ const createTransactionGraph = async (transaction) => {
       MERGE (r:Account {id: $receiverId})
       MERGE (t:Transaction {id: $transactionId})
       SET t.amount    = $amount,
-          t.timestamp = $timestamp
+          t.timestamp = $timestamp,
+          t.senderId  = $senderId,
+          t.receiverId = $receiverId
 
       MERGE (s)-[:SENT]->(t)
       MERGE (t)-[:RECEIVED]->(r)
-
-      MERGE (s)-[:MADE]->(t)
-      MERGE (t)-[:TO]->(r)
       `,
       {
         senderId: transaction.senderId,
@@ -153,66 +152,178 @@ const updateAccountRiskProfile = async (accountId, stats) => {
   }
 };
 
-/* ============================= */
-/* 3️⃣ ENTITY RELATIONSHIPS       */
-/* ============================= */
+/* ═══════════════════════════════════════════════════════════════════════════════
+ * 3️⃣  UPDATE ENTITY RELATIONSHIPS  (Account ↔ Account direct edges)
+ *
+ * Strategy
+ * --------
+ * For each entityResolution link we MERGE a DIRECT relationship between the
+ * two Account nodes (senderId ↔ linkedAccountId).  This is what makes the
+ * neighbor-count query work for hybrid fraud scoring.
+ *
+ * We intentionally do NOT route through Device/IP/Email/Phone intermediary
+ * nodes here — those are written by createTransactionGraph separately.
+ *
+ * Idempotency guarantees
+ * ----------------------
+ *  ON CREATE  → write firstSeen, confidence, linkValue, weight, updatedAt
+ *  ON MATCH   → update confidence to MAX(old, new), updatedAt; never touch firstSeen
+ *
+ * Safety
+ * ------
+ *  • Self-link guard  (senderId === linkedAccountId → skip)
+ *  • Per-link type validation (only the four known types)
+ *  • Per-link data validation (linkedAccountId present, confidence is finite ≥ 0)
+ *  • Neo4j offline → silent return via _guard
+ *  • Any Cypher error per link is caught and logged; the loop continues
+ * ═══════════════════════════════════════════════════════════════════════════════ */
+
+/** Allowed relationship types that map directly to Cypher rel-type names. */
+const ALLOWED_REL_TYPES = new Set([
+  "SHARED_DEVICE",
+  "SHARED_IP",
+  "SHARED_EMAIL",
+  "SHARED_PHONE",
+]);
 
 const updateEntityRelationships = async (transaction) => {
   if (!_guard("updateEntityRelationships")) return;
+
+  const { senderId, entityResolution } = transaction;
+
+  /* Nothing to do */
+  if (!senderId || !entityResolution?.links?.length) return;
 
   const driver = getNeo4jDriver();
   const session = driver.session();
 
   try {
-    const { senderId, entityResolution } = transaction;
+    for (const link of entityResolution.links) {
+      const { type, linkedAccountId, confidence, linkValue } = link ?? {};
 
-    if (!entityResolution?.links?.length) return;
-
-    for (const { type, linkedAccountId, confidence, linkValue } of entityResolution.links) {
-      let query = "";
-
-      if (type === "SHARED_DEVICE") {
-        query = `
-          MERGE (a:Account {id: $senderId})
-          MERGE (b:Account {id: $linkedAccountId})
-          MERGE (d:Device  {id: $linkValue})
-          MERGE (a)-[r:SHARED_DEVICE]->(d) SET r.confidence = $confidence
-          MERGE (b)-[:USES_DEVICE]->(d)
-        `;
-      } else if (type === "SHARED_IP") {
-        query = `
-          MERGE (a:Account {id: $senderId})
-          MERGE (b:Account {id: $linkedAccountId})
-          MERGE (ip:IP {address: $linkValue})
-          MERGE (a)-[r:SHARED_IP]->(ip) SET r.confidence = $confidence
-          MERGE (b)-[:USES_IP]->(ip)
-        `;
-      } else if (type === "SHARED_EMAIL") {
-        query = `
-          MERGE (a:Account {id: $senderId})
-          MERGE (b:Account {id: $linkedAccountId})
-          MERGE (e:Email {value: $linkValue})
-          MERGE (a)-[r:SHARED_EMAIL]->(e) SET r.confidence = $confidence
-          MERGE (b)-[:USES_EMAIL]->(e)
-        `;
-      } else if (type === "SHARED_PHONE") {
-        query = `
-          MERGE (a:Account {id: $senderId})
-          MERGE (b:Account {id: $linkedAccountId})
-          MERGE (p:Phone {number: $linkValue})
-          MERGE (a)-[r:SHARED_PHONE]->(p) SET r.confidence = $confidence
-          MERGE (b)-[:USES_PHONE]->(p)
-        `;
+      /* ── Per-link validation ──────────────────────────────────────────── */
+      if (!ALLOWED_REL_TYPES.has(type)) {
+        console.warn(`⚠️  [graph.service] Unknown link type "${type}" — skipped`);
+        continue;
       }
 
-      if (query) {
-        await session.run(query, { senderId, linkedAccountId, confidence, linkValue });
+      if (!linkedAccountId) {
+        console.warn(`⚠️  [graph.service] Missing linkedAccountId for type ${type} — skipped`);
+        continue;
+      }
+
+      if (typeof confidence !== "number" || !isFinite(confidence)) {
+        console.warn(
+          `⚠️  [graph.service] Invalid confidence "${confidence}" for ${type} — skipped`
+        );
+        continue;
+      }
+
+      /* ── Self-link guard ─────────────────────────────────────────────── */
+      if (senderId === linkedAccountId) {
+        console.warn(`⚠️  [graph.service] Self-link detected for account "${senderId}" — skipped`);
+        continue;
+      }
+
+      /* ── Build Cypher query with dynamic rel-type ─────────────────────
+       * Neo4j does not allow parameterising relationship type names, so
+       * we inject the (allowlisted) type as a string literal.
+       * MERGE uses an undirected pattern (a)-[r:TYPE]-(b) so the edge is
+       * traversable from either direction — required for neighbor queries.
+       * ─────────────────────────────────────────────────────────────────── */
+      const cypher = `
+        MERGE (a:Account {id: $senderId})
+        MERGE (b:Account {id: $linkedAccountId})
+
+        MERGE (a)-[r:${type}]-(b)
+
+        ON CREATE SET
+          r.confidence = $confidence,
+          r.linkValue  = $linkValue,
+          r.weight     = $weight,
+          r.firstSeen  = datetime(),
+          r.updatedAt  = datetime()
+
+        ON MATCH SET
+          r.confidence = CASE
+                           WHEN r.confidence < $confidence THEN $confidence
+                           ELSE r.confidence
+                         END,
+          r.weight     = CASE
+                           WHEN r.confidence < $confidence THEN $weight
+                           ELSE r.weight
+                         END,
+          r.updatedAt  = datetime()
+      `;
+
+      try {
+        await session.run(cypher, {
+          senderId,
+          linkedAccountId,
+          confidence,
+          linkValue: linkValue ?? null,
+          weight: Math.round(confidence * 100),
+        });
+
+        console.log(
+          `  🔗 [graph.service] ${type}: "${senderId}" ↔ "${linkedAccountId}" (confidence: ${confidence})`
+        );
+      } catch (linkErr) {
+        /* Non-fatal — log and continue the loop */
+        console.error(
+          `  ❌ [graph.service] Failed to MERGE ${type} link: ${linkErr.message}`
+        );
       }
     }
 
-    console.log("🔗 [graph.service] Entity relationships updated");
+    console.log("✅ [graph.service] Entity relationships pass complete");
   } catch (error) {
-    console.error("❌ [graph.service] updateEntityRelationships error:", error.message);
+    console.error("❌ [graph.service] updateEntityRelationships outer error:", error.message);
+  } finally {
+    await session.close();
+  }
+};
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+ * 4️⃣  GET NEIGHBOR COUNT
+ *
+ * Returns the number of DISTINCT Account nodes connected to $accountId via any
+ * entity-resolution relationship that carries confidence ≥ 0.5.
+ *
+ * Used by the Python hybrid scorer to decide whether to apply GNN weighting.
+ * Returns -1 when Neo4j is unavailable (scorer falls back to tabular-only).
+ * ═══════════════════════════════════════════════════════════════════════════════ */
+
+const getNeighborCount = async (accountId) => {
+  if (!_guard("getNeighborCount")) return -1;
+
+  if (!accountId) return -1;
+
+  const driver = getNeo4jDriver();
+  const session = driver.session();
+
+  try {
+    const result = await session.run(
+      `
+      MATCH (a:Account {id: $id})-[r:SHARED_DEVICE|SHARED_IP|SHARED_EMAIL|SHARED_PHONE]-(n:Account)
+      WHERE r.confidence >= 0.5
+      RETURN count(DISTINCT n) AS neighbors
+      `,
+      { id: accountId }
+    );
+
+    const record = result.records[0];
+    if (!record) return 0;
+
+    /* Neo4j integers come back as a Neo4j Integer object — convert safely */
+    const raw = record.get("neighbors");
+    const count = typeof raw?.toNumber === "function" ? raw.toNumber() : Number(raw ?? 0);
+
+    console.log(`📊 [graph.service] Neighbor count for "${accountId}": ${count}`);
+    return count;
+  } catch (error) {
+    console.error("❌ [graph.service] getNeighborCount error:", error.message);
+    return -1;  // sentinel: Python scorer treats -1 as "graph unavailable"
   } finally {
     await session.close();
   }
@@ -226,4 +337,5 @@ export default {
   createTransactionGraph,
   updateAccountRiskProfile,
   updateEntityRelationships,
+  getNeighborCount,
 };

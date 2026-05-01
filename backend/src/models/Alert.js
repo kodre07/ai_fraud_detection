@@ -165,10 +165,10 @@ const alertSchema = new mongoose.Schema(
       default: [],
     },
 
-    // ✅ Method name from Python scorer (must stay in sync with Transaction.scoringMethod)
+    // ✅ Method name from Python scorer — must stay in sync with Transaction.scoringMethod
     methodUsed: {
       type: String,
-      enum: ["rule_based", "xgboost", "gnn_hybrid_fallback", "tabular_only", "gnn_hybrid"],
+      enum: ["rule_based", "xgboost", "gnn_hybrid_fallback"],
       default: null,
     },
 

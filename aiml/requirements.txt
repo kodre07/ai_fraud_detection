@@ -1,8 +1,14 @@
-# ─── Core ML (heavy — comment out if not needed for local scoring tests) ──────
-# torch
-# torchvision
-# torchaudio
-# torch-geometric
+# ─── Core ML ──────────────────────────────────────────────────────────────────
+torch==2.7.1                    # CPU-only build; do NOT upgrade without re-checking PyG wheels
+# torchvision                   # not required by scoring worker
+# torchaudio                    # not required by scoring worker
+torch-geometric==2.7.0
+
+# torch-scatter and torch-sparse must be installed from the PyG wheel index:
+#   pip install torch-scatter torch-sparse \
+#       -f https://data.pyg.org/whl/torch-2.7.1+cpu.html
+torch-scatter==2.1.2+pt27cpu
+torch-sparse==0.6.18+pt27cpu
 
 # ─── Classical ML ─────────────────────────────────────────────────────────────
 xgboost
