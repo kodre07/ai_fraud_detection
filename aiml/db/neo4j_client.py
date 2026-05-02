@@ -130,7 +130,7 @@ async def ping() -> bool:
 
 async def get_peer_link_count(
     account_id: str,
-    min_confidence: float = 0.3,
+    min_confidence: float = 0.1,   # Change 7: lowered from 0.3 to capture more shared edges
 ) -> int:
     """
     Count *other* accounts that share a device, IP, email, or phone with
@@ -161,7 +161,8 @@ async def get_peer_link_count(
             record = await result.single()
             count = int(record["peer_count"]) if record else 0
             logger.info(
-                f"📊 Neo4j peer_link_count for '{account_id}': {count} (min_confidence=0.3)"
+                f"📊 Neo4j peer_link_count for '{account_id}': {count} "
+                f"(min_confidence={min_confidence:.2f})"
             )
             return count
     except Exception as exc:

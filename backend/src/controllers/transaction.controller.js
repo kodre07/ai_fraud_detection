@@ -278,21 +278,32 @@ const uploadTransactions = async (req, res, next) => {
     for (const [index, row] of rows.entries()) {
       try {
         /* -- Type conversion (CSV values are all strings) -- */
+        // ✅ Support BOTH frontend format (account_id, device_id, ip)
+        //    and backend format (senderId, receiverId, ipAddress)
+        const senderIdRaw   = row.senderId?.trim()    || row.account_id?.trim() || null;
+        const receiverIdRaw = row.receiverId?.trim()   || null;
+        const ipRaw         = row.ipAddress?.trim()    || row.ip?.trim()         || null;
+        const deviceRaw     = row.deviceId?.trim()     || row.device_id?.trim()  || null;
+
+        // When only account_id is present (frontend CSV) generate a stable receiver
+        const generatedReceiverId = receiverIdRaw
+          || `RECV_${(senderIdRaw || "unknown").replace(/\W/g, "").slice(0, 8).toUpperCase()}`;
+
         const transformedRow = {
-          senderId: row.senderId?.trim() || null,
-          receiverId: row.receiverId?.trim() || null,
-          amount: row.amount ? Number(row.amount) : null,
+          senderId:   senderIdRaw,
+          receiverId: generatedReceiverId,
+          amount:     row.amount ? Number(row.amount) : null,
 
           /* Optional network / device signals */
-          deviceId: row.deviceId?.trim() || null,
-          ipAddress: row.ipAddress?.trim() || null,
+          deviceId:  deviceRaw,
+          ipAddress: ipRaw,
 
           /* Boolean coercions */
-          isVpn: row.isVpn === "true",
+          isVpn:   row.isVpn  === "true",
           isProxy: row.isProxy === "true",
 
           /* Geo / country codes */
-          ipCountry: row.ipCountry?.trim().toUpperCase() || null,
+          ipCountry:      row.ipCountry?.trim().toUpperCase()      || null,
           accountCountry: row.accountCountry?.trim().toUpperCase() || null,
 
           /* Contact signals */
@@ -300,9 +311,9 @@ const uploadTransactions = async (req, res, next) => {
           phone: row.phone?.trim() || null,
 
           /* Optional metadata */
-          currency: row.currency?.trim() || null,
+          currency:         row.currency?.trim()         || null,
           merchantCategory: row.merchantCategory?.trim() || null,
-          userAgent: row.userAgent?.trim() || null,
+          userAgent:        row.userAgent?.trim()        || null,
 
           /* Timestamp (ISO string → Date, or let service default to now) */
           timestamp: row.timestamp ? new Date(row.timestamp) : undefined,

@@ -49,13 +49,11 @@ const router = express.Router();
 /*         ALERT ROUTES          */
 /* ============================= */
 
-// 🔐 Apply auth to ALL alert routes
-router.use(authMiddleware);
-
-// Get all alerts (optionally filter by status)
+// GET alerts is intentionally public (read-only monitoring data)
+// so the dashboard can poll without a JWT token.
 router.get("/", getAllAlerts);
 
-// Update alert status (review / resolved / assigned)
-router.patch("/:id", updateAlertStatus);
+// Update alert status (review / resolved / assigned) — protected
+router.patch("/:id", authMiddleware, updateAlertStatus);
 
 export default router;

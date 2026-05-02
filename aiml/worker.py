@@ -19,6 +19,7 @@ Environment variables used (from .env):
 import asyncio
 import logging
 import os
+from collections import defaultdict
 
 import httpx
 from dotenv import load_dotenv
@@ -49,6 +50,36 @@ MAX_RETRIES       = 3
 POLL_INTERVAL_S   = 1.0    # idle sleep when queue is empty
 CALLBACK_TIMEOUT  = 10.0   # seconds for HTTP POST to Node.js
 VERIFY_INTERVAL   = 10     # call verify_shared_edges() every N completed jobs
+
+# ── Zero-peer fallback ─────────────────────────────────────────────────────────
+# When Neo4j is empty or not reachable, get_peer_link_count() returns 0.
+# Treating every transaction as peer_count=0 collapses ALL routing to the
+# cold-start PATH A (rule_based) and prevents graph adjustments from firing.
+# Instead, substitute this configurable default so scoring stays on PATH B/C
+# for accounts that have transaction history.  A warning is logged so ops can
+# distinguish a genuine isolated account (rare) from a DB connectivity issue.
+DEFAULT_PEER_COUNT: int = int(os.getenv("DEFAULT_PEER_COUNT", "3"))
+
+# How many consecutive zero-peer results before we emit the connectivity warning.
+# (Avoids spamming the log for the very first transaction on a genuinely new account.)
+_ZERO_PEER_WARN_THRESHOLD: int = 3
+_zero_peer_streak: int = 0   # module-level counter; reset on any non-zero result
+
+
+# ── Fix C: In-memory ring-sharing caches (module-level) ───────────────────────
+# These rolling dicts track which sender accounts have been seen using each
+# IP address / device ID.  They let the scorer detect shared-identifier fraud
+# rings independently of Neo4j edge timing (race condition where early-processed
+# accounts see peer_count=0 before their peers are scored).
+#
+# ip_sender_cache[ip]      -> set of senderId strings seen for that IP
+# device_sender_cache[dev] -> set of senderId strings seen for that device
+#
+# Grow monotonically for the lifetime of the process (no expiry in v5).
+# For production use a Redis HyperLogLog or TTL-keyed set; sufficient for
+# the batch-test scenario where all transactions are scored in one session.
+ip_sender_cache: defaultdict     = defaultdict(set)   # ip     -> {senderId, ...}
+device_sender_cache: defaultdict = defaultdict(set)   # device -> {senderId, ...}
 
 
 # ── Callback to Node.js ────────────────────────────────────────────────────────
@@ -118,6 +149,64 @@ async def _process_job(job: dict) -> None:
     #    for GNN embedding.  Both are non-fatal and return safe defaults on error.
     peer_count = await get_peer_link_count(account_id)
     subgraph   = await get_account_subgraph(account_id)
+
+    # ── Change 10: Zero-peer fallback ─────────────────────────────────────────
+    # If peer_count is 0, it may indicate Neo4j is empty/not connected rather
+    # than a genuinely isolated account.  Track a streak; after
+    # _ZERO_PEER_WARN_THRESHOLD consecutive zeros, warn ops and substitute
+    # DEFAULT_PEER_COUNT so routing doesn't silently collapse to PATH A.
+    global _zero_peer_streak
+    if peer_count == 0:
+        _zero_peer_streak += 1
+        if _zero_peer_streak >= _ZERO_PEER_WARN_THRESHOLD:
+            logger.warning(
+                f"⚠️  peer_count=0 for {_zero_peer_streak} consecutive transactions "
+                f"(latest: account={account_id}, tx={tx_id}). "
+                "This may indicate a Neo4j connectivity or data issue rather than "
+                "genuine account isolation. "
+                f"Substituting DEFAULT_PEER_COUNT={DEFAULT_PEER_COUNT} for scoring."
+            )
+            peer_count = DEFAULT_PEER_COUNT
+    else:
+        _zero_peer_streak = 0   # reset on any non-zero result
+
+    # ── Fix B: Inject routing_count as _neighbor_count into tx payload ─────────
+    # scorer._collect_fraud_signals() reads tx["_neighbor_count"] to fire the
+    # graph_linked / graph_linked_strong signals independently of Neo4j peer-link
+    # timing (avoids race condition for early-processed ring accounts).
+    transaction["_neighbor_count"] = routing_count
+
+    # ── Fix C: Update IP/device ring caches, inject peer counts into tx ─────────
+    ip     = (transaction.get("ipAddress") or "").strip()
+    device = (transaction.get("deviceId")  or "").strip().lower()
+    sender = account_id
+
+    # Update caches BEFORE reading counts so the current tx's sender is included.
+    if ip and ip.lower() not in ("nan", "none", "null", ""):
+        ip_sender_cache[ip].add(sender)
+        shared_ip_peer_count = len(ip_sender_cache[ip]) - 1   # exclude self
+    else:
+        shared_ip_peer_count = 0
+
+    if device and device not in ("nan", "none", "null", ""):
+        device_sender_cache[device].add(sender)
+        shared_device_peer_count = len(device_sender_cache[device]) - 1   # exclude self
+    else:
+        shared_device_peer_count = 0
+
+    transaction["shared_ip_peer_count"]     = shared_ip_peer_count
+    transaction["shared_device_peer_count"] = shared_device_peer_count
+
+    if shared_ip_peer_count > 0:
+        logger.info(
+            f"🚨 Ring cache — ip={ip!r} shared by {shared_ip_peer_count} other sender(s) "
+            f"(account={account_id})"
+        )
+    if shared_device_peer_count > 0:
+        logger.info(
+            f"🚨 Ring cache — device={device!r} shared by {shared_device_peer_count} other sender(s) "
+            f"(account={account_id})"
+        )
 
     # 4. Score
     result = score_transaction(transaction, routing_count, peer_count, subgraph)

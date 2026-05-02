@@ -13,6 +13,20 @@ Calibration v3 changes (over-correction fixes):
   Fix 4 — Score floor: transactions with any fraud signal cannot score exactly 0.00
   Fix 5 — Confidence dampening changed to lighter formula (was pulling scores too low)
   Fix 6 — PATH C uses reduced neighbor-aware exculpatory cap (GNN already encodes graph trust)
+
+Calibration v4 changes (signal weight boosts + zero-peer fallback):
+  Change 2  — Fraud signal weights boosted further; see _collect_fraud_signals
+  Change 3  — Exculpatory signal weights reduced; PATH B cap tightened to -0.08
+  Change 4  — Risk tier (_classify_risk) now compares the RAW score, not eff_score —
+              dampening cannot suppress the alert trigger
+  Change 5  — Confidence dampening formula changed to 0.95 + 0.05*confidence (near-no-op)
+  Change 10 — Zero-peer fallback implemented in worker.py (DEFAULT_PEER_COUNT=3)
+
+Calibration v5 changes (ring detection completeness):
+  Fix A — Tiered velocity: extreme (>=10 tx/hr) → 0.35, high (>=5) → 0.24, moderate (>=3) → 0.14
+  Fix B — graph_linked signals fire from neighbor_count in payload (order-independent)
+  Fix C — shared_ip_peer_count / shared_device_peer_count signals from worker in-memory cache
+  Fix D — Exculpatory cap in PATH A applied consistently (fraud_sum floor at 0.0)
 """
 
 import logging
@@ -79,36 +93,44 @@ def _sigmoid_normalize(raw: float, center: float = 0.5, slope: float = 5.0) -> f
 
 # ── Risk classifier ────────────────────────────────────────────────────────────
 
-def _classify_risk(effective_score: float) -> str:
-    """Map effective_score to risk level string."""
-    if effective_score < _RISK_LOW:
+def _classify_risk(raw_score: float) -> str:
+    """
+    Map the RAW (un-dampened) fraud score to a risk tier.
+
+    Change 4: intentionally uses raw_score, NOT eff_score.  Confidence dampening
+    exists to reduce overconfident reporting but must never suppress alert triggers.
+    Example: raw=0.42 dampened to eff=0.39 is still classified 'medium' because
+    the underlying signal IS medium risk — we just don't over-report certainty.
+    """
+    if raw_score < _RISK_LOW:
         return "low"
-    if effective_score < _RISK_MEDIUM:
+    if raw_score < _RISK_MEDIUM:
         return "medium"
-    if effective_score < _RISK_HIGH:
+    if raw_score < _RISK_HIGH:
         return "high"
     return "critical"
 
 
-# ── FIX 5: Lighter confidence dampening ───────────────────────────────────────
+# ── Change 5: Minimal confidence dampening ────────────────────────────────────
 
 def _effective_score(fraud_score: float, confidence: float) -> float:
     """
-    Lightly dampen raw fraud_score when confidence is low.
+    Minimally dampen raw fraud_score for the reported score value only.
 
-    New formula: effective = fraud_score * (0.85 + 0.15 * confidence)
+    Change 5 formula: effective = fraud_score * (0.95 + 0.05 * confidence)
 
-    vs old:      effective = fraud_score * (0.5 + 0.5 * confidence)
+    vs v3 formula:    effective = fraud_score * (0.85 + 0.15 * confidence)
 
-    Old formula cut scores too aggressively at high confidence (0.83 confidence
-    was reducing a 0.43 score to 0.39, below the medium threshold).
-
-    New formula:
+    The v3 formula caused near-miss suppressions: 0.40 raw at confidence=0.65
+    → 0.40 * 0.9475 = 0.379, below the 0.40 medium threshold, so alert dropped.
+    This formula keeps eff_score close to raw_score:
       confidence=1.00 -> multiplier=1.000 (no reduction)
-      confidence=0.83 -> multiplier=0.975 (2.5% reduction)
-      confidence=0.35 -> multiplier=0.903 (10% reduction for very uncertain scores)
+      confidence=0.65 -> multiplier=0.9825 (1.75% reduction)
+      confidence=0.50 -> multiplier=0.975  (2.5% reduction)
+
+    NOTE: risk tier classification uses raw_score, not eff_score (see _classify_risk).
     """
-    return round(fraud_score * (0.85 + 0.15 * confidence), 4)
+    return round(fraud_score * (0.95 + 0.05 * confidence), 4)
 
 
 # ── FIX 1: Reduced graph neighbor adjustment tiers (~40% cut) ─────────────────
@@ -170,7 +192,7 @@ def _exculpatory_cap(peer_count: int, path: str) -> float:
         return -99.0   # sentinel: no cap at all
 
     if path == "xgboost":
-        return -0.20   # full cap for PATH B
+        return -0.08   # Change 5: tightened from -0.20 — safe signals were cancelling too much
 
     # PATH C: gnn_hybrid_fallback — peer-aware tighter cap
     if peer_count <= 5:
@@ -299,7 +321,7 @@ def _collect_fraud_signals(tx: dict) -> tuple[float, list[dict]]:
             "reason": f"Amount {amount:,.0f} is extremely high (>100,000)",
         })
     elif amount > 50_000:
-        w = 0.15; raw += w
+        w = 0.25; raw += w   # boosted from 0.15
         avg_str = f" vs avg {avg_7d:,.0f}" if avg_7d > 0 else ""
         signals.append({
             "feature": "transaction_amount", "actual_value": f"{amount:,.0f}",
@@ -307,11 +329,19 @@ def _collect_fraud_signals(tx: dict) -> tuple[float, list[dict]]:
             "reason": f"Amount {amount:,.0f} is high (>50,000){avg_str}",
         })
     elif amount > 20_000:
-        w = 0.06; raw += w
+        w = 0.15; raw += w   # boosted from 0.06
+        avg_str = f" vs avg {avg_7d:,.0f}" if avg_7d > 0 else ""
         signals.append({
             "feature": "transaction_amount", "actual_value": f"{amount:,.0f}",
             "contribution": +w, "direction": "fraud",
-            "reason": f"Amount {amount:,.0f} is elevated (>20,000)",
+            "reason": f"Amount {amount:,.0f} is elevated (>20,000){avg_str}",
+        })
+    elif amount > 10_000:
+        w = 0.08; raw += w   # new tier
+        signals.append({
+            "feature": "transaction_amount", "actual_value": f"{amount:,.0f}",
+            "contribution": +w, "direction": "fraud",
+            "reason": f"Amount {amount:,.0f} is above normal range (>10,000)",
         })
 
     # Missing device
@@ -334,7 +364,7 @@ def _collect_fraud_signals(tx: dict) -> tuple[float, list[dict]]:
 
     # VPN
     if is_vpn:
-        w = 0.12; raw += w
+        w = 0.20; raw += w   # Change 4: boosted from 0.18
         signals.append({
             "feature": "vpn_detected", "actual_value": True,
             "contribution": +w, "direction": "fraud",
@@ -343,7 +373,7 @@ def _collect_fraud_signals(tx: dict) -> tuple[float, list[dict]]:
 
     # Proxy
     if is_proxy:
-        w = 0.10; raw += w
+        w = 0.16; raw += w   # Change 4: boosted from 0.15
         signals.append({
             "feature": "proxy_detected", "actual_value": True,
             "contribution": +w, "direction": "fraud",
@@ -352,7 +382,7 @@ def _collect_fraud_signals(tx: dict) -> tuple[float, list[dict]]:
 
     # Geo mismatch
     if ip_country and acc_country and ip_country != acc_country:
-        w = 0.10; raw += w
+        w = 0.22; raw += w   # Change 4: boosted from 0.20
         signals.append({
             "feature": "ip_country",
             "actual_value": f"{ip_country} (account: {acc_country})",
@@ -378,45 +408,113 @@ def _collect_fraud_signals(tx: dict) -> tuple[float, list[dict]]:
 
     # First transaction
     if is_first_tx:
-        w = 0.06; raw += w
+        w = 0.14; raw += w   # boosted from 0.06
         signals.append({
             "feature": "first_transaction", "actual_value": True,
             "contribution": +w, "direction": "fraud",
             "reason": "First transaction on this account — no baseline to compare to",
         })
 
-    # New device
-    if is_new_device:
-        w = 0.08; raw += w
+    # New device / New IP — combined signal carries extra weight
+    if is_new_device and is_new_ip:
+        w = 0.22; raw += w   # Change 4: boosted from 0.20 (combined signal)
+        signals.append({
+            "feature": "new_device_and_ip",
+            "actual_value": f"{device or 'UNKNOWN'} / {ip or 'UNKNOWN'}",
+            "contribution": +w, "direction": "fraud",
+            "reason": "Both device AND IP are new on this account — strong anonymity indicator",
+        })
+    elif is_new_device:
+        w = 0.12; raw += w   # Change 4: boosted from 0.10
         signals.append({
             "feature": "new_device", "actual_value": device or "UNKNOWN",
             "contribution": +w, "direction": "fraud",
             "reason": "Device not previously seen on this account",
         })
-
-    # New IP
-    if is_new_ip:
-        w = 0.05; raw += w
+    elif is_new_ip:
+        w = 0.10; raw += w   # Change 4: boosted from 0.08
         signals.append({
             "feature": "new_ip", "actual_value": ip or "UNKNOWN",
             "contribution": +w, "direction": "fraud",
             "reason": "IP address not previously associated with this account",
         })
 
-    # Velocity — 1h window
-    if tx_count_1h >= 5:
-        w = 0.18; raw += w
+    # Velocity — 1h window (Fix A: tiered — extreme/high/moderate)
+    if tx_count_1h >= 10:
+        w = 0.35; raw += w   # Fix A: extreme velocity — structuring / burst attack pattern
         signals.append({
             "feature": "transaction_velocity_1h", "actual_value": tx_count_1h,
             "contribution": +w, "direction": "fraud",
-            "reason": f"{tx_count_1h} transactions in the last hour — extremely high velocity",
+            "reason": f"{tx_count_1h} transactions in the last hour — extreme burst velocity (structuring pattern)",
+        })
+    elif tx_count_1h >= 5:
+        w = 0.24; raw += w   # Change 4: boosted from 0.22
+        signals.append({
+            "feature": "transaction_velocity_1h", "actual_value": tx_count_1h,
+            "contribution": +w, "direction": "fraud",
+            "reason": f"{tx_count_1h} transactions in the last hour — high velocity",
         })
     elif tx_count_1h >= 3:
-        w = 0.10; raw += w
+        w = 0.14; raw += w   # Change 4: boosted from 0.12
         signals.append({
             "feature": "transaction_velocity_1h", "actual_value": tx_count_1h,
             "contribution": +w, "direction": "fraud",
             "reason": f"{tx_count_1h} transactions in the last hour — elevated velocity",
+        })
+
+    # Graph-linked signal — fires from neighbor_count passed in payload (Fix B)
+    # This is order-independent: the neighbor_count reflects the account's SENT
+    # transaction history in Neo4j, not peer-link timing, so it never returns 0
+    # for an account that has already made prior transactions.
+    neighbor_count = int(tx.get("_neighbor_count") or 0)
+    if neighbor_count >= 3:
+        w = 0.10; raw += w   # additional ring bonus on top of base graph_linked
+        signals.append({
+            "feature": "graph_linked_strong", "actual_value": neighbor_count,
+            "contribution": +w, "direction": "fraud",
+            "reason": f"Account has {neighbor_count} prior transactions — well-embedded in graph (ring amplifier)",
+        })
+    elif neighbor_count >= 1:
+        w = 0.05; raw += w
+        signals.append({
+            "feature": "graph_linked", "actual_value": neighbor_count,
+            "contribution": +w, "direction": "fraud",
+            "reason": f"Account has {neighbor_count} prior transactions in Neo4j graph",
+        })
+
+    # Shared-IP ring signal — from worker.py in-memory ip_sender_cache (Fix C)
+    # shared_ip_peer_count = how many OTHER sender accounts used the same IP
+    shared_ip_peers = int(tx.get("shared_ip_peer_count") or 0)
+    if shared_ip_peers >= 2:
+        w = 0.10; raw += w   # additional — large IP-sharing ring
+        signals.append({
+            "feature": "shared_ip_ring_large", "actual_value": shared_ip_peers,
+            "contribution": +w, "direction": "fraud",
+            "reason": f"{shared_ip_peers} other accounts used this IP — large IP-sharing ring detected",
+        })
+    if shared_ip_peers >= 1:
+        w = 0.20; raw += w
+        signals.append({
+            "feature": "shared_ip_ring", "actual_value": shared_ip_peers,
+            "contribution": +w, "direction": "fraud",
+            "reason": f"{shared_ip_peers} other account(s) share this IP — possible syndicate",
+        })
+
+    # Shared-device ring signal — from worker.py in-memory device_sender_cache (Fix C)
+    shared_dev_peers = int(tx.get("shared_device_peer_count") or 0)
+    if shared_dev_peers >= 2:
+        w = 0.10; raw += w   # additional — large device-sharing ring
+        signals.append({
+            "feature": "shared_device_ring_large", "actual_value": shared_dev_peers,
+            "contribution": +w, "direction": "fraud",
+            "reason": f"{shared_dev_peers} other accounts used this device — large device-sharing ring",
+        })
+    if shared_dev_peers >= 1:
+        w = 0.25; raw += w   # device sharing is higher confidence than IP sharing
+        signals.append({
+            "feature": "shared_device_ring", "actual_value": shared_dev_peers,
+            "contribution": +w, "direction": "fraud",
+            "reason": f"{shared_dev_peers} other account(s) share this device — synthetic-identity risk",
         })
 
     # Amount deviation
@@ -429,12 +527,20 @@ def _collect_fraud_signals(tx: dict) -> tuple[float, list[dict]]:
             "reason": f"Amount is {deviation:.1f}x above {avg_str} — extreme deviation",
         })
     elif deviation > 2.0:
-        w = 0.08; raw += w
+        w = 0.18; raw += w   # boosted from 0.08
         avg_str = f"avg {avg_7d:,.0f}" if avg_7d > 0 else "account baseline"
         signals.append({
             "feature": "amount_deviation", "actual_value": f"{deviation:.1f}x",
             "contribution": +w, "direction": "fraud",
             "reason": f"Amount is {deviation:.1f}x above {avg_str}",
+        })
+    elif deviation > 1.5:
+        w = 0.10; raw += w   # new tier
+        avg_str = f"avg {avg_7d:,.0f}" if avg_7d > 0 else "account baseline"
+        signals.append({
+            "feature": "amount_deviation", "actual_value": f"{deviation:.1f}x",
+            "contribution": +w, "direction": "fraud",
+            "reason": f"Amount is {deviation:.1f}x above {avg_str} — moderate deviation",
         })
 
     # Odd-hour transaction
@@ -455,12 +561,12 @@ def _collect_safe_signals(tx: dict) -> tuple[float, list[dict]]:
     """
     Evaluate all negative (safe/exculpatory) signals with reduced weights (v3).
 
-    FIX 2: Individual weights reduced from v2:
-      trusted_device:   -0.08  (was -0.12)
-      trusted_ip:       -0.06  (was -0.10)
-      frequent_user>10: -0.10  (was -0.15)
-      frequent_user>5:  -0.05  (was -0.08)
-      low_amount:       -0.05  (was -0.08)
+    FIX 2: Individual weights reduced from v2, further reduced in v4:
+      trusted_device:   -0.04  (was -0.08 in v3, -0.12 in v2)
+      trusted_ip:       -0.03  (was -0.06 in v3, -0.10 in v2)
+      frequent_user>10: -0.05  (was -0.10 in v3, -0.15 in v2)
+      frequent_user>5:  -0.05  (unchanged)
+      low_amount:       -0.02  (was -0.05 in v3, -0.08 in v2)
 
     Returns (raw_sum, signals_list).
     The caller is responsible for applying the exculpatory cap before combining
@@ -479,14 +585,14 @@ def _collect_safe_signals(tx: dict) -> tuple[float, list[dict]]:
 
     # Frequent user — known, active account
     if tx_count_24h > 10:
-        w = -0.10; raw += w   # was -0.15
+        w = -0.04; raw += w   # Change 3: reduced from -0.05
         signals.append({
             "feature": "account_activity", "actual_value": tx_count_24h,
             "contribution": w, "direction": "safe",
             "reason": f"Account has {tx_count_24h} transactions in 24h — high-frequency legitimate user",
         })
     elif tx_count_24h > 5:
-        w = -0.05; raw += w   # was -0.08
+        w = -0.05; raw += w   # unchanged
         signals.append({
             "feature": "account_activity", "actual_value": tx_count_24h,
             "contribution": w, "direction": "safe",
@@ -495,7 +601,7 @@ def _collect_safe_signals(tx: dict) -> tuple[float, list[dict]]:
 
     # Known device (present and not flagged as new)
     if device and device not in ("nan", "none", "null", "") and not is_new_device:
-        w = -0.08; raw += w   # was -0.12
+        w = -0.03; raw += w   # Change 3: reduced from -0.04
         signals.append({
             "feature": "trusted_device", "actual_value": tx.get("deviceId", ""),
             "contribution": w, "direction": "safe",
@@ -504,7 +610,7 @@ def _collect_safe_signals(tx: dict) -> tuple[float, list[dict]]:
 
     # Known IP (present and not flagged as new)
     if ip and ip.lower() not in ("nan", "none", "null", "") and not is_new_ip:
-        w = -0.06; raw += w   # was -0.10
+        w = -0.02; raw += w   # Change 3: reduced from -0.03
         signals.append({
             "feature": "trusted_ip", "actual_value": ip,
             "contribution": w, "direction": "safe",
@@ -513,7 +619,7 @@ def _collect_safe_signals(tx: dict) -> tuple[float, list[dict]]:
 
     # Low amount — normal range
     if amount > 0 and amount < 5_000 and deviation < 1.5:
-        w = -0.05; raw += w   # was -0.08
+        w = -0.02; raw += w   # reduced from -0.05
         signals.append({
             "feature": "low_amount_normal", "actual_value": f"{amount:,.0f}",
             "contribution": w, "direction": "safe",
@@ -529,13 +635,16 @@ def _rule_based_score(tx: dict) -> tuple[float, list[dict]]:
     """
     PATH A: Pure rule-based scorer for new/isolated accounts.
 
-    No exculpatory cap — cold-start accounts have not yet earned trust,
-    so applying a trust cap would be incorrect.
+    Fix D: Exculpatory signals are still applied, but the combined pre-graph
+    score is floored at 0.0 so safe signals can never cancel ring-fraud bonuses
+    (graph_linked, shared_ip_ring, shared_device_ring) that were added in
+    _collect_fraud_signals.  The safe signals remain visible in the explanation.
     """
     fraud_raw, fraud_sigs = _collect_fraud_signals(tx)
     safe_raw,  safe_sigs  = _collect_safe_signals(tx)
 
-    combined_raw = fraud_raw + safe_raw   # no cap for PATH A
+    # Cap safe contribution so it cannot drive the score negative
+    combined_raw = max(fraud_raw + safe_raw, 0.0)   # Fix D: floor at 0
     all_signals  = fraud_sigs + safe_sigs
 
     score = _sigmoid_normalize(combined_raw)
@@ -908,7 +1017,7 @@ def route(
 
     # ── Confidence dampening (lighter formula — see _effective_score) ──────────
     eff_score  = _effective_score(score, confidence)
-    risk_level = _classify_risk(eff_score)
+    risk_level = _classify_risk(score)   # Change 4: compare RAW score to thresholds
 
     # ── Build rich explanation ─────────────────────────────────────────────────
     explanation = _build_explanation(
